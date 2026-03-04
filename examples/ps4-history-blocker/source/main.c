@@ -1,59 +1,52 @@
-//#define DEBUG_SOCKET
-#define DEBUG_IP "192.168.2.2"
-#define DEBUG_PORT 9023
-
 #include "ps4.h"
 
-int _main(struct thread *td) {
-  UNUSED(td);
+#define debug(sock, format, ...)                    \
+    do {                                            \
+        char buffer[512];                           \
+        int size = sprintf(buffer, format, ##__VA_ARGS__); \
+        sceNetSend(sock, buffer, size, 0);          \
+    } while(0)
 
-  initKernel();
-  initLibc();
+int _main(void) {
 
-#ifdef DEBUG_SOCKET
-  initNetwork();
-  DEBUG_SOCK = SckConnect(DEBUG_IP, DEBUG_PORT);
-#endif
+    // Initialize
+    initKernel();
+    initLibc();
+    initNetwork();
 
-  jailbreak();
+    char socketName[] = "debug";
 
-  initSysUtil();
+    struct sockaddr_in server;
+    server.sin_len = sizeof(server);
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = IP(192, 168, 0, 4);
+    server.sin_port = sceNetHtons(9023);
+    memset(server.sin_zero, 0, sizeof(server.sin_zero));
 
-  SceUserServiceLoginUserIdList userIdList;
-  memset_s(&userIdList, sizeof(SceUserServiceLoginUserIdList), 0, sizeof(SceUserServiceLoginUserIdList));
+    int sock = sceNetSocket(socketName, AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+        return 0;
 
-  char fw_version[6] = {0};
-  get_firmware_string(fw_version);
-  printf_notification("Running History Blocker\nPS4 Firmware %s", fw_version);
-
-  if (getUserIDList(&userIdList) == 0) {
-    for (int i = 0; i < SCE_USER_SERVICE_MAX_LOGIN_USERS; i++) {
-      if (userIdList.userId[i] != -1 && userIdList.userId[i] != 0) {
-        char hfile[PATH_MAX] = {0};
-        snprintf_s(hfile, sizeof(hfile), "/user/home/%x/webbrowser/endhistory.txt", userIdList.userId[i]);
-        if (!file_exists(hfile) && !dir_exists(hfile)) {
-          mkdir(hfile, 0777);
-          printf_notification("History blocker enabled for: %s\n\nRun payload again to disable", getUserName(userIdList.userId[i]));
-        } else {
-          if (dir_exists(hfile)) {
-            rmdir(hfile);
-            printf_notification("History blocker disabled for: %s\n\nRun payload again to enable", getUserName(userIdList.userId[i]));
-          } else if (file_exists(hfile)) {
-            unlink(hfile);
-            mkdir(hfile, 0777);
-            printf_notification("History blocker enabled for: %s\n\nRun payload again to disable", getUserName(userIdList.userId[i]));
-          }
-        }
-      }
+    if (sceNetConnect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        sceNetSocketClose(sock);
+        return 0;
     }
-  } else {
-    printf_notification("Unable to get user ID list");
-  }
 
-#ifdef DEBUG_SOCKET
-  printf_debug("Closing socket...\n");
-  SckClose(DEBUG_SOCK);
-#endif
+    // Print PID
+    debug(sock, "PID: %d\n", syscall(20));
 
-  return 0;
+    // ---- SCTP TEST ----
+    int sctp = sceNetSocket("sctp_test", AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+
+    if (sctp < 0) {
+        debug(sock, "SCTP not supported (error: %d)\n", sctp);
+    } else {
+        debug(sock, "SCTP supported\n");
+        sceNetSocketClose(sctp);
+    }
+    // -------------------
+
+    sceNetSocketClose(sock);
+
+    return 0;
 }
