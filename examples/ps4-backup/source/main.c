@@ -1,5 +1,9 @@
 #include "ps4.h"
 
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP 132
+#endif
+
 #define debug(sock, format, ...)                    \
     do {                                            \
         char buffer[512];                           \
