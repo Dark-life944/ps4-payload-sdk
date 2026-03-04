@@ -1,6 +1,5 @@
 #include "ps4.h"
 
-#define AF_INET         2
 #define AF_INET6        23
 
 #define SOCK_STREAM     1
@@ -102,7 +101,7 @@ int _main(void) {
 
     int packet_len = 8 + 40 + 16;
 
-    int sent = sceNetSendto(raw6_sock, icmp6_packet, packet_len, 0,
+    int sent = sceNetSend(raw6_sock, icmp6_packet, packet_len, 0,
                             (struct sockaddr *)&dest, sizeof(dest));
 
     if (sent < 0) {
