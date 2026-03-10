@@ -23,8 +23,8 @@ struct cmsghdr {
     int           cmsg_type;
 };
 
-#define ITERATIONS 1000000
-#define CONTROL_LEN 256
+#define ITERATIONS 2000000
+#define CONTROL_LEN 512
 
 struct cmsghdr *cmsg;
 uint8_t control_buf[CONTROL_LEN];
@@ -57,6 +57,7 @@ void *race_thread(void *arg) {
 
     for (int i = 0; i < ITERATIONS; i++) {
         cmsg->cmsg_len = 0x50;
+        for(volatile int dump=0; dump<10; dump++);
         cmsg->cmsg_len = 0xFFFF;
     }
     return NULL;
