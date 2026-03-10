@@ -1,7 +1,5 @@
 #include "ps4.h"
 
-#include <stdarg.h>
-
 typedef struct {
     uint64_t bits[16];
 } cpuset_t;
@@ -35,14 +33,10 @@ uint8_t control_buf[CONTROL_LEN];
 int global_sock;
 int debug_sock;
 
-void print_debug(const char *fmt, ...) {
-    if (debug_sock <= 0) return;
-    char buffer[512];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
-    va_end(args);
-    SckSend(debug_sock, buffer, strlen(buffer));
+void print_debug(const char *msg) {
+    if (debug_sock > 0 && msg) {
+        SckSend(debug_sock, (char *)msg, strlen(msg));
+    }
 }
 
 void *sendmsg_thread(void *arg) {
@@ -92,7 +86,8 @@ int _main(struct thread *td) {
     global_sock = syscall(97, 2, 2, 0);
     if (global_sock < 0) {
         print_debug("[-] Socket Error\n");
-        return -1;
+    } else {
+        print_debug("[+] Global Sock opened successfully\n");
     }
 
     memset(control_buf, 0, CONTROL_LEN);
