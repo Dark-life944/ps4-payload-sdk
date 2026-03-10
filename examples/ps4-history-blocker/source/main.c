@@ -1,5 +1,7 @@
 #include "ps4.h"
 
+#include <stdarg.h>
+
 typedef struct {
     uint64_t bits[16];
 } cpuset_t;
@@ -25,7 +27,7 @@ struct cmsghdr {
 
 #define ITERATIONS 2000000
 #define CONTROL_LEN 512
-#define DEBUG_IP "192.168.100.16"
+#define DEBUG_IP "192.168.176.162"
 #define DEBUG_PORT 9023
 
 struct cmsghdr *cmsg;
