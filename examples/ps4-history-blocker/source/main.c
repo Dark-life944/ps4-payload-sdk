@@ -237,3 +237,4 @@ int _main(struct thread *td) {
     if (debug_sock > 0) 
 SckClose(debug_sock);
     return 0;
+}
