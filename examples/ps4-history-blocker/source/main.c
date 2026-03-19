@@ -234,5 +234,6 @@ int _main(struct thread *td) {
 
     debug_print("[+] Race Completed. If no Panic, adjust delay.\n");
 
-    if (debug_sock > 0) SckClose(debug_sock);
+    if (debug_sock > 0) 
+SckClose(debug_sock);
     return 0;
