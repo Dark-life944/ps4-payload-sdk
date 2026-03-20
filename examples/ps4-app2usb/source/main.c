@@ -1,6 +1,5 @@
 #include <ps4.h>
-#include <stdint.h>
-#include <string.h>
+
 
 // الإزاحات لنسخة 10.01
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
