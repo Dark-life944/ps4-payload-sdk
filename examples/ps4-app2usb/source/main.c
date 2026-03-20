@@ -1,6 +1,5 @@
 #include <ps4.h>
-#include <stdint.h>
-#include <string.h>
+
 
 // --- الإزاحات (Offsets) لنسخة 10.01 ---
 // اخترنا هذا الـ Gadget لأنه يسهل رصد التغير في السجلات
