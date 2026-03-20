@@ -3,8 +3,6 @@
 #define DEBUG_PORT 9023
 
 #include <ps4.h>
-#include <stdint.h>
-#include <string.h>
 
 // --- الإزاحات (Offsets) لنسخة 10.01 ---
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
