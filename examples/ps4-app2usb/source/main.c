@@ -1,6 +1,5 @@
 #include <ps4.h>
-#include <stdint.h>
-#include <string.h>
+
 
 // الإزاحات لنسخة 10.01
 #define OFF_POP_RAX_RET          0x29974f 
