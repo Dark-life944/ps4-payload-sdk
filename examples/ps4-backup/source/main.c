@@ -122,10 +122,10 @@ int _main(struct thread *td) {
 #include <ps4.h>
 
 // --- الإزاحات (Offsets) المستخرجة لنسخة 9.00 ---
-#define OFF_PUSH_RSP_POP_RSI_RET 0x7B687A   // push rsp ; pop rsi ; ret
-#define OFF_JMP_RSI_3D           0x596603   // jmp qword ptr [rsi + 0x3d] (FIRST_GADGET)
-#define OFF_LEA_RSP_RSI_20_RET   0x541e46   // lea rsp, [rsi + 0x20] ; repz ret
-#define OFF_POP_RBX_R14_RBP_JMP  0x1B4151   // pop rbx ; pop r14 ; pop rbp ; jmp qword ptr [rsi + 0x10]
+#define OFF_PUSH_RSP_POP_RSI_RET 0x7B687A 
+#define OFF_JMP_RSI_3D           0x596603   
+#define OFF_LEA_RSP_RSI_20_RET   0x541e46   
+#define OFF_POP_RBX_R14_RBP_JMP  0x1B4151   
 
 // --- الإعدادات ---
 #define CONTROL_LEN 256
