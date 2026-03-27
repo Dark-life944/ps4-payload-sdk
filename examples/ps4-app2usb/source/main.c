@@ -156,51 +156,40 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
-uint8_t memcpy_signature[] = { 
-    0x48, 0x89, 0xF8, 
-    0x48, 0x89, 0xD1, 
-    0x48, 0xC1, 0xE9, 0x03 
-};
-
-void hex_dump_klog(void *addr, size_t size) {
-    unsigned char *p = (unsigned char *)addr;
-    printf_debug("[DUMP] Hex at %p: ", addr);
-    for (size_t i = 0; i < size; i++) {
-        printf_debug("%02x ", p[i]);
-    }
-    printf_debug("\n");
-}
-
-int find_and_dump_memcpy_payload(struct thread *td, void *arg) {
-    uint64_t kbase = get_kernel_base();
-    uint64_t *found_addr = (uint64_t *)arg;
-    
-    for (uint64_t offset = 0x300000; offset < 0x1500000; offset++) {
-        if (memcmp((void *)(kbase + offset), memcpy_signature, sizeof(memcpy_signature)) == 0) {
-            *found_addr = kbase + offset;
-            printf_debug("[SUCCESS] Target Found! Offset: 0x%lx\n", offset);
-            hex_dump_klog((void *)(*found_addr), 16);
-            return 0; 
-        }
-    }
-    return -1;
-}
+#define MEMCPY_OFFSET 0x472d20
+#define PAGE_SIZE 0x4000
 
 int _main(struct thread *td) {
     initKernel();
     initLibc();
     initSysUtil();
-    jailbreak();
-    
-    uint64_t final_addr = 0;
+    jailbreak(); 
 
-    printf_debug("========== Kernel Discovery Mode ==========\n");
+    uint64_t kbase = get_kernel_base();
+    uint64_t real_memcpy_addr = kbase + MEMCPY_OFFSET;
+    void (*kernel_memcpy)(void*, void*, size_t) = (void *)real_memcpy_addr;
 
-    if (syscall(11, find_and_dump_memcpy_payload, &final_addr) == 0 && final_addr != 0) {
-        printf_debug("Result: memcpy is confirmed at %p\n", (void *)final_addr);
+    size_t total_size = PAGE_SIZE * 2;
+    char *user_pages = (char *)mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (user_pages == MAP_FAILED) return -1;
+
+    for (size_t i = 0; i < PAGE_SIZE; i++) user_pages[i] = 'A';
+    for (size_t i = PAGE_SIZE; i < total_size; i++) user_pages[i] = 'B';
+
+    char *src_edge = user_pages + PAGE_SIZE - 4; 
+    char dest_buffer[16];
+    for (int i = 0; i < 16; i++) dest_buffer[i] = 0;
+
+    kernel_memcpy(dest_buffer, src_edge, 12);
+
+    if (dest_buffer[4] == 'B') {
+        printf_debug("Success: %c%c%c%c", dest_buffer[4], dest_buffer[5], dest_buffer[6], dest_buffer[7]);
     } else {
-        printf_debug("Result: memcpy not found in range.\n");
+        printf_debug("Failed");
     }
+
+    munmap(user_pages, total_size);
 
     return 0;
 }
