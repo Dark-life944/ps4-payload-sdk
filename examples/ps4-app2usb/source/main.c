@@ -158,26 +158,22 @@ int _main(struct thread *td) {
 
 #define MEMCPY_OFFSET 0x472d20
 #define PAGE_SIZE 0x4000
-#define X86_CR0_WP (1 << 16)
+
+struct args_t {
+    void *u_dst;
+};
 
 int kpayload_memcpy_test(struct thread *td, void *arg) {
     uint64_t kbase = get_kernel_base();
     void (*k_memcpy)(void*, void*, size_t) = (void *)(kbase + MEMCPY_OFFSET);
 
-    void **params = (void **)arg;
-    void *dest = params[0];
-    void *src  = params[1];
-    size_t len = (size_t)params[2];
+    struct args_t *a = (struct args_t *)arg;
 
-    // تعطيل حماية الكتابة (WP)
-    uint64_t cr0 = readCr0();
-    writeCr0(cr0 & ~X86_CR0_WP);
+    // اختيار نهاية صفحة من kernel image
+    void *src = (void *)(kbase + PAGE_SIZE - 0x10); // safer من -4
+    size_t len = 0x10; // تجنب over-read غير متحكم
 
-    // تنفيذ النسخ الأعمى عبر حدود الصفحات
-    k_memcpy(dest, src, len);
-
-    // إعادة تفعيل حماية الكتابة فوراً
-    writeCr0(cr0);
+    k_memcpy(a->u_dst, src, len);
 
     return 0;
 }
@@ -187,33 +183,32 @@ int _main(struct thread *td) {
     initLibc();
     initSysUtil();
 
-    size_t total_size = PAGE_SIZE * 2;
-    char *user_pages = (char *)mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (user_pages == MAP_FAILED) return -1;
+    size_t len = 0x20;
 
-    for (size_t i = 0; i < PAGE_SIZE; i++) user_pages[i] = 'A';
-    for (size_t i = PAGE_SIZE; i < total_size; i++) user_pages[i] = 'B';
+    void *buf = mmap(NULL, len,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1, 0);
 
-    char *src_edge = user_pages + PAGE_SIZE - 4; 
-    char dest_buffer[16];
-    for (int i = 0; i < 16; i++) dest_buffer[i] = 0;
+    if (buf == MAP_FAILED) return -1;
 
-    void *args[3];
-    args[0] = (void *)dest_buffer;
-    args[1] = (void *)src_edge;
-    args[2] = (void *)12; 
+    // تأكيد أن الصفحة mapped فعليًا
+    for (int i = 0; i < len; i++)
+        ((char*)buf)[i] = 0;
 
-    // الاستدعاء الآمن عبر kexec
-    syscall(11, kpayload_memcpy_test, args);
+    struct args_t args;
+    args.u_dst = buf;
 
-    if (dest_buffer[4] == 'B') {
-        printf_debug("Success! Boundary Crossed Safely\nData: %c%c%c%c", 
-                            dest_buffer[4], dest_buffer[5], 
-                            dest_buffer[6], dest_buffer[7]);
-    } else {
-        printf_debug("Failed: WP disabled but copy incomplete");
-    }
+    syscall(11, kpayload_memcpy_test, &args);
 
-    munmap(user_pages, total_size);
+    unsigned char *c = (unsigned char*)buf;
+
+    printf_notification(
+        "Leak: %02x %02x %02x %02x %02x %02x %02x %02x",
+        c[0], c[1], c[2], c[3],
+        c[4], c[5], c[6], c[7]
+    );
+
+    munmap(buf, len);
     return 0;
 }
