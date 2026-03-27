@@ -159,19 +159,28 @@ int _main(struct thread *td) {
 #define MEMCPY_OFFSET 0x472d20
 #define PAGE_SIZE 0x4000
 
-int _main(struct thread *td) {
-    initKernel();
-    initLibc();
-    initSysUtil();
-    jailbreak(); 
-
+int kernel_payload(struct thread *td, void *arg) {
     uint64_t kbase = get_kernel_base();
     uint64_t real_memcpy_addr = kbase + MEMCPY_OFFSET;
     void (*kernel_memcpy)(void*, void*, size_t) = (void *)real_memcpy_addr;
 
+    void **params = (void **)arg;
+    void *dest = params[0];
+    void *src  = params[1];
+    size_t len = (size_t)params[2];
+
+    kernel_memcpy(dest, src, len);
+
+    return 0;
+}
+
+int _main(struct thread *td) {
+    initKernel();
+    initLibc();
+    initSysUtil();
+
     size_t total_size = PAGE_SIZE * 2;
     char *user_pages = (char *)mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
     if (user_pages == MAP_FAILED) return -1;
 
     for (size_t i = 0; i < PAGE_SIZE; i++) user_pages[i] = 'A';
@@ -181,12 +190,17 @@ int _main(struct thread *td) {
     char dest_buffer[16];
     for (int i = 0; i < 16; i++) dest_buffer[i] = 0;
 
-    kernel_memcpy(dest_buffer, src_edge, 12);
+    void *args[3];
+    args[0] = (void *)dest_buffer;
+    args[1] = (void *)src_edge;
+    args[2] = (void *)12;
+
+    syscall(11, kernel_payload, args);
 
     if (dest_buffer[4] == 'B') {
-        printf_debug("Success: %c%c%c%c", dest_buffer[4], dest_buffer[5], dest_buffer[6], dest_buffer[7]);
+        printf_notification("Success: %c%c%c%c", dest_buffer[4], dest_buffer[5], dest_buffer[6], dest_buffer[7]);
     } else {
-        printf_debug("Failed");
+        printf_notification("Failed");
     }
 
     munmap(user_pages, total_size);
