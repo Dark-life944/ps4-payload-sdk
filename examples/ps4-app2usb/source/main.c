@@ -190,9 +190,9 @@ int _main(struct thread *td) {
   // 5. طباعة النتيجة لنرى "التسريب"
   // بما أننا لا نملك printf كاملة، سنرسل إشعاراً بالنتيجة
   if (dest[4] == 'B') {
-    printf_notification("Success: Leaked data from Page 2! Content: %c%c%c%c", dest[4], dest[5], dest[6], dest[7]);
+    printf_debug("Success: Leaked data from Page 2! Content: %c%c%c%c", dest[4], dest[5], dest[6], dest[7]);
   } else {
-    printf_notification("Failed: Data mismatch");
+    printf_debug("Failed: Data mismatch");
   }
 
   return 0;
