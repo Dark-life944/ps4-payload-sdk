@@ -156,6 +156,16 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
+static inline void flush_cache(void *addr) {
+    __asm__ volatile ("clflush (%0)" : : "r"(addr));
+}
+
+static inline uint64_t read_tsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 int _main(struct thread *td) {
   UNUSED(td);
 
@@ -165,29 +175,28 @@ int _main(struct thread *td) {
   initSysUtil();
 
   size_t page_size = PAGE_SIZE; 
-  
-  char *pages = (char *)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  uint64_t t1, t2;
 
-  if (pages == MAP_FAILED) {
-    return 0;
-  }
+  char *pages = (char *)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (pages == MAP_FAILED) return 0;
 
   mprotect(pages + page_size, page_size, PROT_NONE);
 
   char *edge_src = pages + page_size - 4; 
   char dest[16];
 
-  printf_debug("Testing Boundary...\n");
+  flush_cache(edge_src);
+
+  printf_debug("Testing Boundary with Timing and Flush...\n");
+
+  t1 = read_tsc();
+  
   memcpy(dest, edge_src, 8); 
 
-  char overlap_buf[32] = "ABCDEFGH12345678";
-  memcpy(overlap_buf + 1, overlap_buf, 10);
-  
-  if (overlap_buf[2] == 'A') {
-    printf_notification("BUG: Overlap Detected");
-  } else {
-    printf_notification("Success: Overlap Safe");
-  }
+  t2 = read_tsc();
+
+  printf_debug("Time: %llu\n", (unsigned long long)(t2 - t1));
 
   return 0;
 }
+
