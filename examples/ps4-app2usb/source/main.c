@@ -164,32 +164,28 @@ int _main(struct thread *td) {
   jailbreak();
   initSysUtil();
 
-  size_t page_size = 0x4000; 
-  char *pages = (char *)sceKernelMmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  size_t page_size = PAGE_SIZE; 
+  
+  char *pages = (char *)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
   if (pages == MAP_FAILED) {
-    printf_debug("[-] mmap failed\n");
     return 0;
   }
 
-  sceKernelMprotect(pages + page_size, page_size, PROT_NONE);
+  mprotect(pages + page_size, page_size, PROT_NONE);
 
   char *edge_src = pages + page_size - 4; 
   char dest[16];
 
-  printf_debug("[*] Testing Boundary...\n");
-  sceKernelMemcpy(dest, edge_src, 8); 
-
-  printf_debug("[+] Boundary Test Passed\n");
+  printf_debug("Testing Boundary...\n");
+  memcpy(dest, edge_src, 8); 
 
   char overlap_buf[32] = "ABCDEFGH12345678";
-  sceKernelMemcpy(overlap_buf + 1, overlap_buf, 10);
+  memcpy(overlap_buf + 1, overlap_buf, 10);
   
   if (overlap_buf[2] == 'A') {
-    printf_debug("[!] BUG: Overlap Fail\n");
-    printf_notification("BUG: Overlap Fail");
+    printf_notification("BUG: Overlap Detected");
   } else {
-    printf_debug("[+] Overlap Safe\n");
     printf_notification("Success: Overlap Safe");
   }
 
