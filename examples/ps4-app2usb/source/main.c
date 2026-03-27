@@ -156,8 +156,16 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
+static volatile int start_flag = 0;
+
+#define PROBE_PAGES 256
+#define STRIDE 4096
+#define THRESHOLD 200
+
+static unsigned char probe_array[PROBE_PAGES * STRIDE];
+
 static inline void flush_cache(void *addr) {
-    __asm__ volatile ("clflush [%0]" : : "r"(addr));
+    __asm__ volatile ("clflush (%0)" : : "r"(addr));
 }
 
 static inline uint64_t read_tsc(void) {
@@ -166,36 +174,92 @@ static inline uint64_t read_tsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
+// Helper thread: يراقب كامل probe_array
+void *cache_monitor_thread(void *arg) {
+    uint64_t t1, t2;
+
+    while (!start_flag);
+
+    while (1) {
+        for (int i = 0; i < 256; i++) {
+            volatile unsigned char *addr = probe_array + i * STRIDE;
+
+            t1 = read_tsc();
+            *addr;
+            t2 = read_tsc();
+
+            if ((t2 - t1) < THRESHOLD) {
+                printf_debug("Cache hit at index: %d (cycles=%llu)\n",
+                    i, (unsigned long long)(t2 - t1));
+            }
+        }
+    }
+
+    return NULL;
+}
+
 int _main(struct thread *td) {
-  UNUSED(td);
+    UNUSED(td);
 
-  initKernel();
-  initLibc();
-  jailbreak();
-  initSysUtil();
+    initKernel();
+    initLibc();
+    jailbreak();
+    initSysUtil();
 
-  size_t page_size = PAGE_SIZE; 
-  uint64_t t1, t2;
+    size_t page_size = PAGE_SIZE;
+    ScePthread monitor_thread;
 
-  char *pages = (char *)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (pages == MAP_FAILED) return 0;
+    // allocate 2 pages
+    char *pages = (char *)mmap(NULL, page_size * 2,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-  mprotect(pages + page_size, page_size, PROT_NONE);
+    if (pages == MAP_FAILED) return 0;
 
-  char *edge_src = pages + page_size - 4; 
-  char dest[16];
+    // الصفحة الثانية ممنوعة
+    mprotect(pages + page_size, page_size, PROT_NONE);
 
-  flush_cache(edge_src);
+    char *edge_src = pages + page_size - 4;
+    char *target_addr = pages + page_size;
 
-  printf_debug("Testing Boundary with Timing and Flush...\n");
+    char dest[16];
 
-  t1 = read_tsc();
-  
-  memcpy(dest, edge_src, 8); 
+    // تهيئة probe array
+    for (int i = 0; i < 256; i++) {
+        probe_array[i * STRIDE] = 1;
+    }
 
-  t2 = read_tsc();
+    // flush كامل
+    for (int i = 0; i < 256; i++) {
+        flush_cache(probe_array + i * STRIDE);
+    }
 
-  printf_debug("Time: %llu\n", (unsigned long long)(t2 - t1));
+    flush_cache(edge_src);
+    flush_cache(target_addr);
 
-  return 0;
+    // تشغيل الخيط المساعد
+    scePthreadCreate(&monitor_thread, NULL,
+        cache_monitor_thread, NULL, "monitor");
+
+    printf_debug("Race Started\n");
+
+    start_flag = 1;
+
+    // =========================
+    // الجزء المهم (التجربة)
+    // =========================
+
+    // trigger
+    memcpy(dest, edge_src, 8);
+
+    // محاولة استخدام القيمة
+    unsigned char value = dest[0];
+
+    // encoding في cache
+    volatile unsigned char *probe =
+        probe_array + (value * STRIDE);
+
+    *probe;
+
+    return 0;
 }
