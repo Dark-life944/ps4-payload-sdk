@@ -1,3 +1,4 @@
+/*
 #include <ps4.h>
 
 // --- تعريف الهياكل يدوياً لضمان اكتمال الأنواع (Complete Types) ---
@@ -150,4 +151,47 @@ int _main(struct thread *td) {
     }
 
     return 0;
+}
+*/
+
+#include "ps4.h"
+
+int _main(struct thread *td) {
+  UNUSED(td);
+
+  initKernel();
+  initLibc();
+  jailbreak();
+  initSysUtil();
+
+  size_t page_size = 0x4000; 
+  char *pages = (char *)sceKernelMmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+
+  if (pages == MAP_FAILED) {
+    printf_debug("[-] mmap failed\n");
+    return 0;
+  }
+
+  sceKernelMprotect(pages + page_size, page_size, PROT_NONE);
+
+  char *edge_src = pages + page_size - 4; 
+  char dest[16];
+
+  printf_debug("[*] Testing Boundary...\n");
+  sceKernelMemcpy(dest, edge_src, 8); 
+
+  printf_debug("[+] Boundary Test Passed\n");
+
+  char overlap_buf[32] = "ABCDEFGH12345678";
+  sceKernelMemcpy(overlap_buf + 1, overlap_buf, 10);
+  
+  if (overlap_buf[2] == 'A') {
+    printf_debug("[!] BUG: Overlap Fail\n");
+    printf_notification("BUG: Overlap Fail");
+  } else {
+    printf_debug("[+] Overlap Safe\n");
+    printf_notification("Success: Overlap Safe");
+  }
+
+  return 0;
 }
