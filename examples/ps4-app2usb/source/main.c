@@ -178,6 +178,7 @@ int _main(struct thread *td) {
     initKernel();
     initLibc();
     initSysUtil();
+    jailbreak();
 
     size_t total_size = PAGE_SIZE * 2;
     char *user_pages = (char *)mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
