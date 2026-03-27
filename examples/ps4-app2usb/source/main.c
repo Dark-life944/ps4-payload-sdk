@@ -156,44 +156,51 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
+uint8_t memcpy_signature[] = { 
+    0x48, 0x89, 0xF8, 
+    0x48, 0x89, 0xD1, 
+    0x48, 0xC1, 0xE9, 0x03 
+};
+
+void hex_dump_klog(void *addr, size_t size) {
+    unsigned char *p = (unsigned char *)addr;
+    printf_debug("[DUMP] Hex at %p: ", addr);
+    for (size_t i = 0; i < size; i++) {
+        printf_debug("%02x ", p[i]);
+    }
+    printf_debug("\n");
+}
+
+int find_and_dump_memcpy_payload(struct thread *td, void *arg) {
+    uint64_t kbase = get_kernel_base();
+    uint64_t *found_addr = (uint64_t *)arg;
+    
+    for (uint64_t offset = 0x300000; offset < 0x1500000; offset++) {
+        if (memcmp((void *)(kbase + offset), memcpy_signature, sizeof(memcpy_signature)) == 0) {
+            *found_addr = kbase + offset;
+            printf_debug("[SUCCESS] Target Found! Offset: 0x%lx\n", offset);
+            hex_dump_klog((void *)(*found_addr), 16);
+            return 0; 
+        }
+    }
+    return -1;
+}
+
 int _main(struct thread *td) {
-  UNUSED(td);
+    initKernel();
+    initLibc();
+    initSysUtil();
+    jailbreak();
+    
+    uint64_t final_addr = 0;
 
-  initKernel();
-  initLibc();
-  jailbreak();
-  initSysUtil();
+    printf_debug("========== Kernel Discovery Mode ==========\n");
 
-  size_t page_size = PAGE_SIZE; 
-  
-  // 1. حجز صفحتين كلاهما مسموح القراءة والكتابة فيهما
-  char *pages = (char *)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (syscall(11, find_and_dump_memcpy_payload, &final_addr) == 0 && final_addr != 0) {
+        printf_debug("Result: memcpy is confirmed at %p\n", (void *)final_addr);
+    } else {
+        printf_debug("Result: memcpy not found in range.\n");
+    }
 
-  if (pages == MAP_FAILED) return 0;
-
-  // 2. ملء الصفحة الأولى بـ 'A' والصفحة الثانية بـ 'B' لتمييز الحدود
-  memset(pages, 'A', page_size);
-  memset(pages + page_size, 'B', page_size);
-
-  // 3. وضع المصدر عند آخر 4 بايت من الصفحة الأولى
-  char *edge_src = pages + page_size - 4; 
-  char dest[16];
-  memset(dest, 0, 16);
-
-  printf_debug("Copying across pages (No Protection)...\n");
-
-  // 4. طلب نسخ 12 بايت:
-  // أول 4 بايت ستكون 'AAAA' (من نهاية الصفحة 1)
-  // الـ 8 بايت التالية ستكون 'BBBBBBBB' (من بداية الصفحة 2)
-  memcpy(dest, edge_src, 12); 
-
-  // 5. طباعة النتيجة لنرى "التسريب"
-  // بما أننا لا نملك printf كاملة، سنرسل إشعاراً بالنتيجة
-  if (dest[4] == 'B') {
-    printf_debug("Success: Leaked data from Page 2! Content: %c%c%c%c", dest[4], dest[5], dest[6], dest[7]);
-  } else {
-    printf_debug("Failed: Data mismatch");
-  }
-
-  return 0;
+    return 0;
 }
