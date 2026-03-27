@@ -157,7 +157,7 @@ int _main(struct thread *td) {
 #include "ps4.h"
 
 static inline void flush_cache(void *addr) {
-    __asm__ volatile ("clflush (%0)" : : "r"(addr));
+    __asm__ volatile ("clflush [%0]" : : "r"(addr));
 }
 
 static inline uint64_t read_tsc(void) {
@@ -199,4 +199,3 @@ int _main(struct thread *td) {
 
   return 0;
 }
-
