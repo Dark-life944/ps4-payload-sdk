@@ -160,17 +160,21 @@ struct args_t {
     uint64_t u_dst;
 };
 
+// ================= KERNEL PAYLOAD =================
 int kpayload_test(struct thread *td, struct args_t *args) {
     UNUSED(td);
+
+    void *kernel_base;
+    uint8_t *kernel_ptr;
 
     int (*copyout)(const void *kaddr, void *uaddr, size_t len);
 
     uint16_t fw = get_firmware();
 
-    // الصحيح
+    // تهيئة copyout + kernel_base
     build_kpayload(fw, copyout_macro);
 
-    uint64_t kbase = get_kernel_base();
+    uint64_t kbase = (uint64_t)kernel_base;
 
     void *src = (void *)(kbase + 0x1000 - 0x40);
     size_t len = 0x10;
@@ -178,7 +182,10 @@ int kpayload_test(struct thread *td, struct args_t *args) {
     return copyout(src, (void *)args->u_dst, len);
 }
 
+// ================= USERLAND =================
 int _main(struct thread *td) {
+    UNUSED(td);
+
     initKernel();
     initLibc();
     initSysUtil();
@@ -188,24 +195,27 @@ int _main(struct thread *td) {
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1, 0);
 
-    if (buf == MAP_FAILED)
+    if (buf == MAP_FAILED) {
+        printf_notification("mmap failed");
         return -1;
+    }
 
     memset(buf, 0, 0x20);
 
     struct args_t args;
     args.u_dst = (uint64_t)buf;
 
-    // الصحيح بدل syscall
+    //
     if (kexec(&kpayload_test, &args) < 0) {
         printf_notification("kexec failed");
+        munmap(buf, 0x20);
         return -1;
     }
 
-    unsigned char *c = buf;
+    unsigned char *c = (unsigned char *)buf;
 
     printf_notification(
-        "%02x %02x %02x %02x %02x %02x %02x %02x",
+        "%02X %02X %02X %02X %02X %02X %02X %02X",
         c[0], c[1], c[2], c[3],
         c[4], c[5], c[6], c[7]
     );
