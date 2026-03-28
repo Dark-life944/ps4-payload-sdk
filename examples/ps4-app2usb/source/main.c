@@ -161,7 +161,7 @@ struct args_t {
     uint16_t fw;
 };
 
-// ================= KERNEL PAYLOAD =================
+// ================= KERNEL =================
 int kpayload_test(struct thread *td, struct args_t *args) {
     UNUSED(td);
 
@@ -173,7 +173,6 @@ int kpayload_test(struct thread *td, struct args_t *args) {
     uint16_t fw = args->fw;
     printf_debug("[K] fw: %d\n", fw);
 
-    // فقط جلب copyout + kernel_base
     build_kpayload(fw, copyout_macro);
 
     if (!copyout) {
@@ -189,7 +188,6 @@ int kpayload_test(struct thread *td, struct args_t *args) {
     printf_debug("[K] kernel_base: %p\n", kernel_base);
     printf_debug("[K] copyout: %p\n", copyout);
 
-    // ⚠️ مهم: ننسخ فقط 8 bytes (آمن جدًا)
     int ret = copyout(&kernel_base, (void *)args->u_dst, sizeof(kernel_base));
 
     printf_debug("[K] copyout ret=%d\n", ret);
@@ -202,6 +200,8 @@ int _main(struct thread *td) {
 
     initKernel();
     initLibc();
+    jailbreak();
+    mmap_patch();
     initSysUtil();
 
     void *buf = mmap(NULL, 0x100,
@@ -233,7 +233,7 @@ int _main(struct thread *td) {
         return -1;
     }
 
-    // قراءة النتيجة (kernel_base)
+  
     uint64_t kbase = *(uint64_t *)buf;
 
     printf_debug("[U] kernel_base leaked: %p\n", (void *)kbase);
