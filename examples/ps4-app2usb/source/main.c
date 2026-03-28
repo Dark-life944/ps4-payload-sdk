@@ -164,62 +164,88 @@ struct args_t {
 int kpayload_test(struct thread *td, struct args_t *args) {
     UNUSED(td);
 
+    printf_debug("[K] entered kpayload\n");
+
     void *kernel_base;
     uint8_t *kernel_ptr;
 
     int (*copyout)(const void *kaddr, void *uaddr, size_t len);
 
     uint16_t fw = get_firmware();
+    printf_debug("[K] fw: %d\n", fw);
 
-    // تهيئة copyout + kernel_base
+    printf_debug("[K] before build_kpayload\n");
     build_kpayload(fw, copyout_macro);
+    printf_debug("[K] after build_kpayload\n");
 
-    uint64_t kbase = (uint64_t)kernel_base;
+    printf_debug("[K] kernel_base: %p\n", kernel_base);
 
-    void *src = (void *)(kbase + 0x1000 - 0x40);
-    size_t len = 0x10;
+    void *src = kernel_base;
+    size_t len = 0x100;
 
-    return copyout(src, (void *)args->u_dst, len);
+    printf_debug("[K] before copyout src=%p len=0x%lx\n", src, len);
+
+    int ret = copyout(src, (void *)args->u_dst, len);
+
+    printf_debug("[K] after copyout ret=%d\n", ret);
+
+    return ret;
 }
 
 // ================= USERLAND =================
 int _main(struct thread *td) {
     UNUSED(td);
 
+    printf_debug("[U] start\n");
+
     initKernel();
     initLibc();
     initSysUtil();
 
-    void *buf = mmap(NULL, 0x20,
+    printf_debug("[U] after init\n");
+
+    void *buf = mmap(NULL, 0x100,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1, 0);
 
+    printf_debug("[U] mmap addr: %p\n", buf);
+
     if (buf == MAP_FAILED) {
-        printf_notification("mmap failed");
+        printf_debug("[U] mmap failed\n");
         return -1;
     }
 
-    memset(buf, 0, 0x20);
+    memset(buf, 0, 0x100);
 
     struct args_t args;
     args.u_dst = (uint64_t)buf;
 
-    //
-    if (kexec(&kpayload_test, &args) < 0) {
-        printf_notification("kexec failed");
-        munmap(buf, 0x20);
+    printf_debug("[U] before kexec\n");
+
+    int ret = kexec(&kpayload_test, &args);
+
+    printf_debug("[U] after kexec ret=%d\n", ret);
+
+    if (ret < 0) {
+        printf_debug("[U] kexec failed\n");
+        munmap(buf, 0x100);
         return -1;
     }
 
     unsigned char *c = (unsigned char *)buf;
 
-    printf_notification(
-        "%02X %02X %02X %02X %02X %02X %02X %02X",
-        c[0], c[1], c[2], c[3],
-        c[4], c[5], c[6], c[7]
-    );
+    printf_debug("[U] dump:\n");
 
-    munmap(buf, 0x20);
+    for (int i = 0; i < 16; i++) {
+        printf_debug("%02X ", c[i]);
+    }
+
+    printf_debug("\n");
+
+    munmap(buf, 0x100);
+
+    printf_debug("[U] done\n");
+
     return 0;
 }
