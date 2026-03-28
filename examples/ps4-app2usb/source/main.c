@@ -156,7 +156,6 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
-#define MEMCPY_OFFSET 0x472d20
 #define PAGE_SIZE 0x4000
 
 struct args_t {
@@ -164,16 +163,16 @@ struct args_t {
 };
 
 int kpayload_memcpy_test(struct thread *td, void *arg) {
+    (void)td;
+
     uint64_t kbase = get_kernel_base();
-    void (*k_memcpy)(void*, void*, size_t) = (void *)(kbase + MEMCPY_OFFSET);
 
     struct args_t *a = (struct args_t *)arg;
 
-    // اختيار نهاية صفحة من kernel image
-    void *src = (void *)(kbase + PAGE_SIZE - 0x40); // safer من -4
-    size_t len = 0x10; // تجنب over-read غير متحكم
+    void *src = (void *)(kbase + PAGE_SIZE - 0x40);
+    size_t len = 0x10;
 
-    k_memcpy(a->u_dst, src, len);
+    copyout(src, a->u_dst, len);
 
     return 0;
 }
@@ -190,20 +189,19 @@ int _main(struct thread *td) {
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1, 0);
 
-    if (buf == MAP_FAILED) return -1;
+    if (buf == MAP_FAILED)
+        return -1;
 
-    // تأكيد أن الصفحة mapped فعليًا
-    for (int i = 0; i < len; i++)
-        ((char*)buf)[i] = 0;
+    memset(buf, 0, len);
 
     struct args_t args;
     args.u_dst = buf;
 
     syscall(11, kpayload_memcpy_test, &args);
 
-    unsigned char *c = (unsigned char*)buf;
+    unsigned char *c = (unsigned char *)buf;
 
-    printf_notification(
+    printf_debug(
         "Leak: %02x %02x %02x %02x %02x %02x %02x %02x",
         c[0], c[1], c[2], c[3],
         c[4], c[5], c[6], c[7]
