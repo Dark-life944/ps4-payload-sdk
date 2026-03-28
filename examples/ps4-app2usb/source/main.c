@@ -167,36 +167,35 @@ int kpayload_test(struct thread *td, struct args_t *args) {
 
     printf_debug("[K] entered\n");
 
-    void *kernel_base;
-    uint8_t *kernel_ptr;
+    void *kernel_base = NULL;
+    uint8_t *kernel_ptr = NULL;
+    void *prison0 = NULL;
+    void *rootvnode = NULL;
 
-    int (*copyout)(const void *kaddr, void *uaddr, size_t len);
+    int (*copyout)(const void *kaddr, void *uaddr, size_t len) = NULL;
 
     uint16_t fw = args->fw;
-
     printf_debug("[K] fw: %d\n", fw);
 
-    
+    // ⚠️ لا تستعمل if هنا، استخدم build_kpayload
     build_kpayload(fw, copyout_macro);
 
-    
+    // ==== Checks ====
     if (!kernel_base) {
-        printf_debug("[K] ERROR: kernel_base is NULL!\n");
+        printf_debug("[K] kernel_base is NULL!\n");
         return -1;
     }
-
+    if (!kernel_ptr) {
+        printf_debug("[K] kernel_ptr is NULL!\n");
+        return -1;
+    }
     if (!copyout) {
-        printf_debug("[K] ERROR: copyout is NULL!\n");
+        printf_debug("[K] copyout is NULL!\n");
         return -1;
     }
 
-    // تحقق إضافي داخل macro copyout_macro
-    if (kernel_base == NULL) {
-        printf_debug("[K] ERROR: kernel_base inside copyout_macro is NULL\n");
-        return -1;
-    }
-
-    printf_debug("[K] copyout ptr: %p\n", copyout);
+    printf_debug("[K] copyout ptr: %p, kernel_base: %p, kernel_ptr: %p\n",
+                 copyout, kernel_base, kernel_ptr);
 
     void *src = kernel_base;
     size_t len = 0x100;
@@ -216,8 +215,6 @@ int _main(struct thread *td) {
 
     initKernel();
     initLibc();
-    jailbreak();
-    mmap_patch();
     initSysUtil();
 
     void *buf = mmap(NULL, 0x200,
@@ -238,29 +235,27 @@ int _main(struct thread *td) {
 
     printf_debug("[U] fw: %d\n", args.fw);
 
+    // ===== مؤقتا لتعليق kexec =====
+    printf_debug("[U] skipping kexec for test\n");
+    /*
     printf_debug("[U] before kexec\n");
-
     int ret = kexec(&kpayload_test, &args);
-
     printf_debug("[U] after kexec ret=%d\n", ret);
-
     if (ret < 0) {
         printf_debug("[U] kexec failed\n");
         munmap(buf, 0x200);
         return -1;
     }
+    */
 
+    // مجرد عرض محتوى الـ buffer بعد memset فقط
     unsigned char *c = (unsigned char *)buf;
-
-    printf_debug("[U] dump:\n");
-
+    printf_debug("[U] dump (should be all zeros):\n");
     for (int i = 0; i < 16; i++) {
         printf_debug("%02X ", c[i]);
     }
-
     printf_debug("\n");
 
     munmap(buf, 0x200);
-
     return 0;
 }
