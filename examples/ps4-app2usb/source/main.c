@@ -176,15 +176,27 @@ int kpayload_test(struct thread *td, struct args_t *args) {
 
     printf_debug("[K] fw: %d\n", fw);
 
-    // ⚠️ لا تستعمل if هنا
+    
     build_kpayload(fw, copyout_macro);
 
-    printf_debug("[K] copyout ptr: %p\n", copyout);
-
-    if (!copyout) {
-        printf_debug("[K] copyout NULL!\n");
+    
+    if (!kernel_base) {
+        printf_debug("[K] ERROR: kernel_base is NULL!\n");
         return -1;
     }
+
+    if (!copyout) {
+        printf_debug("[K] ERROR: copyout is NULL!\n");
+        return -1;
+    }
+
+    // تحقق إضافي داخل macro copyout_macro
+    if (kernel_base == NULL) {
+        printf_debug("[K] ERROR: kernel_base inside copyout_macro is NULL\n");
+        return -1;
+    }
+
+    printf_debug("[K] copyout ptr: %p\n", copyout);
 
     void *src = kernel_base;
     size_t len = 0x100;
