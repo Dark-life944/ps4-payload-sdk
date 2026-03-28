@@ -158,14 +158,14 @@ int _main(struct thread *td) {
 
 struct args_t {
     uint64_t u_dst;
-    uint16_t fw; // الآن نمرر firmware من userland
+    uint16_t fw;
 };
 
 // ================= KERNEL PAYLOAD =================
 int kpayload_test(struct thread *td, struct args_t *args) {
     UNUSED(td);
 
-    printf_debug("[K] payload entered\n");
+    printf_debug("[K] entered\n");
 
     void *kernel_base;
     uint8_t *kernel_ptr;
@@ -174,28 +174,26 @@ int kpayload_test(struct thread *td, struct args_t *args) {
 
     uint16_t fw = args->fw;
 
-    printf_debug("[K] firmware version: %d\n", fw);
+    printf_debug("[K] fw: %d\n", fw);
 
-    // build_kpayload الآن يستخدم firmware الصحيح
-    if (build_kpayload(fw, copyout_macro) < 0) {
-        printf_debug("[K] build_kpayload failed\n");
-        return -1;
-    }
+    // ⚠️ لا تستعمل if هنا
+    build_kpayload(fw, copyout_macro);
 
-    printf_debug("[K] copyout pointer: %p\n", copyout);
+    printf_debug("[K] copyout ptr: %p\n", copyout);
 
     if (!copyout) {
-        printf_debug("[K] copyout is NULL!\n");
+        printf_debug("[K] copyout NULL!\n");
         return -1;
     }
 
-    // المصدر للنسخ: kernel_base نفسه
-    void *src = kernel_base; // أو src = (void *)(kernel_base + 0x1000 - 0x40); إذا أردت عنوان محدد
+    void *src = kernel_base;
     size_t len = 0x100;
 
     printf_debug("[K] before copyout\n");
+
     int ret = copyout(src, (void *)args->u_dst, len);
-    printf_debug("[K] after copyout, ret=%d\n", ret);
+
+    printf_debug("[K] after copyout ret=%d\n", ret);
 
     return ret;
 }
@@ -214,7 +212,7 @@ int _main(struct thread *td) {
         -1, 0);
 
     if (buf == MAP_FAILED) {
-        printf_debug("mmap failed\n");
+        printf_debug("[U] mmap failed\n");
         return -1;
     }
 
@@ -222,25 +220,33 @@ int _main(struct thread *td) {
 
     struct args_t args;
     args.u_dst = (uint64_t)buf;
-    args.fw = get_firmware(); // هنا نمرر firmware من userland
+    args.fw = get_firmware();
 
-    printf_debug("[U] fw: %d, buf=%p\n", args.fw, buf);
+    printf_debug("[U] fw: %d\n", args.fw);
 
-    // تشغيل الكيرنل payload
-    int kret = kexec(&kpayload_test, &args);
-    if (kret < 0) {
-        printf_debug("kexec failed\n");
+    printf_debug("[U] before kexec\n");
+
+    int ret = kexec(&kpayload_test, &args);
+
+    printf_debug("[U] after kexec ret=%d\n", ret);
+
+    if (ret < 0) {
+        printf_debug("[U] kexec failed\n");
         munmap(buf, 0x200);
         return -1;
     }
 
     unsigned char *c = (unsigned char *)buf;
-    printf_debug("[U] kernel memory dump:");
+
+    printf_debug("[U] dump:\n");
+
     for (int i = 0; i < 16; i++) {
-        printf_debug(" %02X", c[i]);
+        printf_debug("%02X ", c[i]);
     }
+
     printf_debug("\n");
 
     munmap(buf, 0x200);
+
     return 0;
 }
