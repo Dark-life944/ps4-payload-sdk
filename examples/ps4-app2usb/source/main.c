@@ -170,7 +170,7 @@ int kpayload_memcpy_test(struct thread *td, void *arg) {
     struct args_t *a = (struct args_t *)arg;
 
     // اختيار نهاية صفحة من kernel image
-    void *src = (void *)(kbase + PAGE_SIZE - 0x10); // safer من -4
+    void *src = (void *)(kbase + PAGE_SIZE - 0x40); // safer من -4
     size_t len = 0x10; // تجنب over-read غير متحكم
 
     k_memcpy(a->u_dst, src, len);
