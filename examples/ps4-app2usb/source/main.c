@@ -216,6 +216,8 @@ int _main(struct thread *td) {
 
     initKernel();
     initLibc();
+    jailbreak();
+    mmap_patch();
     initSysUtil();
 
     void *buf = mmap(NULL, 0x200,
