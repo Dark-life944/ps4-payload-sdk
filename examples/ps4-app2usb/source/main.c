@@ -156,25 +156,26 @@ int _main(struct thread *td) {
 
 #include "ps4.h"
 
-#define PAGE_SIZE 0x4000
-
 struct args_t {
-    void *u_dst;
+    uint64_t u_dst;
 };
 
-int kpayload_memcpy_test(struct thread *td, void *arg) {
-    (void)td;
+int kpayload_test(struct thread *td, struct args_t *args) {
+    UNUSED(td);
+
+    int (*copyout)(const void *kaddr, void *uaddr, size_t len);
+
+    uint16_t fw = get_firmware();
+
+    // الصحيح
+    build_kpayload(fw, copyout_macro);
 
     uint64_t kbase = get_kernel_base();
 
-    struct args_t *a = (struct args_t *)arg;
-
-    void *src = (void *)(kbase + PAGE_SIZE - 0x40);
+    void *src = (void *)(kbase + 0x1000 - 0x40);
     size_t len = 0x10;
 
-    copyout(src, a->u_dst, len);
-
-    return 0;
+    return copyout(src, (void *)args->u_dst, len);
 }
 
 int _main(struct thread *td) {
@@ -182,9 +183,7 @@ int _main(struct thread *td) {
     initLibc();
     initSysUtil();
 
-    size_t len = 0x20;
-
-    void *buf = mmap(NULL, len,
+    void *buf = mmap(NULL, 0x20,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1, 0);
@@ -192,21 +191,25 @@ int _main(struct thread *td) {
     if (buf == MAP_FAILED)
         return -1;
 
-    memset(buf, 0, len);
+    memset(buf, 0, 0x20);
 
     struct args_t args;
-    args.u_dst = buf;
+    args.u_dst = (uint64_t)buf;
 
-    syscall(11, kpayload_memcpy_test, &args);
+    // الصحيح بدل syscall
+    if (kexec(&kpayload_test, &args) < 0) {
+        printf_notification("kexec failed");
+        return -1;
+    }
 
-    unsigned char *c = (unsigned char *)buf;
+    unsigned char *c = buf;
 
-    printf_debug(
-        "Leak: %02x %02x %02x %02x %02x %02x %02x %02x",
+    printf_notification(
+        "%02x %02x %02x %02x %02x %02x %02x %02x",
         c[0], c[1], c[2], c[3],
         c[4], c[5], c[6], c[7]
     );
 
-    munmap(buf, len);
+    munmap(buf, 0x20);
     return 0;
 }
